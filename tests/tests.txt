@@ -1,0 +1,82 @@
+# Tests
+
+## Test 1 - Generate a Thai work schedule in Demo mode [sanity]
+Viewport: desktop
+Covers: public onboarding, Demo mode, Thai Quick Input, POST /api/translate-work-lines, event preview, auto category/color, lunch lock
+Description: Verifies a new user can try the core workflow without external credentials and generate usable English events.
+
+Steps:
+1. Click "เริ่มใช้งานฟรี" and choose "Try Demo without Teamup"
+2. Enter `17/SEP` with `09.30-12.00 ไปหน้างานตรวจงานบ้านคุณ Steven` and `13.00-15.00 ทำแบบห้องซักรีดบ้านคุณ Steven`, then click "Generate Schedule"
+3. Review the two preview events and category pills
+
+Expected: Two English preview events appear, the site visit has Work Outside / Follow Up classification, the drawing has Job Routine classification, and normal work does not occupy 12:00-13:00.
+
+## Test 2 - Browse the Demo monthly calendar and inspect a day
+Viewport: desktop
+Covers: Calendar navigation, monthly event markers, mapped category colors, day detail, responsive calendar controls
+Description: Verifies the calendar experience is understandable before a user connects a real Teamup account. Live POST /api/teamup/month-events success is intentionally excluded from automated QA because it requires user-owned Teamup credentials.
+
+Setup:
+1. Choose "Try Demo without Teamup"
+
+Steps:
+1. Open "Calendar"
+2. Click a date that has a colored event marker
+3. Review the day detail, then use Previous / Next month and Today controls
+
+Expected: The selected day shows a readable event detail with category color, and month navigation remains usable.
+
+## Test 3 - Read the built-in sample attendance and reuse scanner time
+Viewport: mobile
+Covers: Attendance mobile UI, image preprocessing, POST /api/attendance/ocr, scanner-time table, Attendance Auto-Time handoff
+Description: Verifies the built-in sample scan is sent through the real OCR route and its scanner times can drive untimed Schedule input.
+
+Setup:
+1. Choose "Try Demo without Teamup"
+
+Steps:
+1. Open "Attendance" and tap "Try Sample Scan"
+2. Confirm scanner rows appear, then tap "Use Attendance in Schedule"
+3. Enter the first returned date header followed by an untimed line `ทำแบบห้องซักรีด` and tap "Generate Schedule"
+
+Expected: At least one attendance row shows a check-in/check-out pair and Schedule generates work using the scanner-time range while preserving the lunch break.
+
+## Test 4 - Generate two PDF batches and merge them
+Viewport: desktop
+Covers: PDF natural-language date range, Demo event source, PDF generation, PDF Queue persistence, PDF merge and date ordering
+Description: Verifies the public PDF workflow can interpret a Thai command, create queued batches, and merge selected batches without requiring external credentials.
+
+Setup:
+1. Choose "Try Demo without Teamup"
+
+Steps:
+1. Open "PDF Export", enter `ช่วยปริ้น ตั้งแต่วันที่ 20 AUG จนถึงล่าสุด`, click "Read Command", then click "Generate PDF"
+2. Change the range to a second short date range and click "Generate PDF" again
+3. Select both queue batches and click "Merge Selected"
+
+Expected: Two PDF batches remain visible in PDF Queue, and merging completes with a visible success message that reports the combined page count.
+
+## Test 5 - Reject a failed Teamup connection and keep the Guide usable
+Viewport: mobile
+Covers: POST /api/teamup/discover failure handling, Teamup connection guardrail, Guide / FAQ mobile behavior, credential privacy copy
+Description: Verifies rejected user-owned Teamup credentials fail visibly without blocking the public onboarding guide. Positive Teamup discover/write/calendar automation is intentionally excluded from QA because it requires each user's external Teamup account and permissions.
+
+QA Faults:
+```json
+[
+  {
+    "method": "POST",
+    "path": "/api/teamup/discover",
+    "status": 401,
+    "body_json": {"error":"Teamup rejected the API key."}
+  }
+]
+```
+
+Steps:
+1. Start setup, enter `bad-key` and `ks1234567890123456`, then tap "Check Connection"
+2. Confirm the visible connection error, go back to the home page, and open the Guide
+3. Expand one FAQ item and review the credential note
+
+Expected: Setup clearly reports the connection failure, while the Guide remains readable on mobile and explains that Public Edition uses each user's own Teamup connection.
