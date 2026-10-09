@@ -67,6 +67,7 @@ type TeamupEvent = {
   title: string;
   categories: CategoryName[];
   allDay?: boolean;
+  subcalendarIds?: number[];
 };
 
 type Subcalendar = { id: number; name: string; readonly?: boolean };
@@ -96,7 +97,9 @@ type PdfDay = {
   date: string;
   events: TeamupEvent[];
   printIdentity?: PdfPrintIdentity;
+  sidebar?: PdfSidebar;
 };
+type PdfSidebar = { visible:boolean; ids:number[]; calendars:Subcalendar[] };
 type PdfJob = {
   id: string;
   start: string;
@@ -104,6 +107,7 @@ type PdfJob = {
   createdAt: string;
   pages: PdfDay[];
   printIdentity?: PdfPrintIdentity;
+  sidebar?: PdfSidebar;
 };
 
 type Toast = { tone: 'ok' | 'warn' | 'error'; text: string } | null;
@@ -715,10 +719,15 @@ function renderPdfCanvas(day: PdfDay, fallbackIdentity: PdfPrintIdentity) {
   ctx.fillText(fullDate(day.date), 70, 124);
   const top = 190;
   const bottom = 1300;
-  const left = 142;
+  const sidebarEntries = day.sidebar?.visible ? day.sidebar.calendars.filter(c => day.sidebar!.ids.includes(c.id)) : [];
+  if (sidebarEntries.length) { ctx.font='700 14px Arial'; ctx.fillStyle='#263844'; ctx.fillText('Calendars',60,170);
+    sidebarEntries.slice(0,30).forEach((c,i)=>{const y=189+i*30;const cat=CATEGORIES.find(k=>c.name.toLowerCase().includes(k.toLowerCase()));const color=cat?CATEGORY_META[cat].color:'#1689aa';ctx.fillStyle=color;ctx.fillRect(60,y,6,22);ctx.strokeStyle=color;ctx.strokeRect(60,y,196,22);ctx.font='12px Arial';ctx.fillStyle='#263844';ctx.fillText(c.name,71,y+16,180);});
+  }
+  const left = sidebarEntries.length ? 282 : 76;
   const right = 930;
-  const startHour = 8;
-  const endHour = 20;
+  const timed = day.events.filter(e=>!e.allDay);
+  const startHour = timed.length ? Math.max(0,Math.min(8,Math.floor(Math.min(...timed.map(e=>e.start))/60))) : 8;
+  const endHour = timed.length ? Math.min(24,Math.max(20,Math.ceil(Math.max(...timed.map(e=>e.end))/60))) : 20;
   const minuteHeight = (bottom - top) / ((endHour - startHour) * 60);
   for (let hour = startHour; hour <= endHour; hour += 1) {
     const y = top + (hour - startHour) * 60 * minuteHeight;
@@ -733,30 +742,31 @@ function renderPdfCanvas(day: PdfDay, fallbackIdentity: PdfPrintIdentity) {
       ctx.fillText(`${String(hour).padStart(2, '0')}:00`, 72, y + 4);
     }
   }
-  day.events
-    .filter(event => !event.allDay)
-    .forEach(event => {
+  const allDayEvents=day.events.filter(e=>e.allDay);
+  if(allDayEvents.length){ctx.font='700 12px Arial';ctx.fillStyle='#263844';ctx.fillText('All day: '+allDayEvents.map(e=>e.title).join(' | '),left,168,right-left);}
+  timed.forEach(event => {
       const start = Math.max(event.start, startHour * 60);
       const end = Math.min(event.end, endHour * 60);
       if (end <= start) return;
       const y = top + (start - startHour * 60) * minuteHeight;
-      const height = Math.max(30, (end - start) * minuteHeight);
+      const height=Math.max(15,(end-start)*minuteHeight);
+      const overlap=timed.filter(other=>other.start<event.end && other.end>event.start);
+      const width=(right-left)/Math.max(1,overlap.length);
+      const x=left+Math.max(0,overlap.findIndex(other=>other.id===event.id))*width;
       ctx.fillStyle = '#fff';
       ctx.strokeStyle = '#cbd5dc';
-      ctx.fillRect(left, y + 1, right - left, height - 2);
-      ctx.strokeRect(left, y + 1, right - left, height - 2);
+      ctx.fillRect(x, y + 1, width, Math.max(12,height - 2));
+      ctx.strokeRect(x, y + 1, width, Math.max(12,height - 2));
       const category = event.categories[0] || 'Job Routine';
       ctx.fillStyle = CATEGORY_META[category].color;
-      ctx.fillRect(left, y + 1, 7, height - 2);
+      ctx.fillRect(x, y + 1, 5, Math.max(12,height - 2));
       ctx.fillStyle = '#263844';
       ctx.font = '700 12px Arial, sans-serif';
       const label = `${formatTime(event.start)}  ${event.title}`;
       const maxChars = 105;
       ctx.fillText(
         label.length > maxChars ? `${label.slice(0, maxChars)}…` : label,
-        left + 20,
-        y + 20
-      );
+        x+10, y+Math.min(16,height-2), Math.max(10,width-15));
     });
   ctx.strokeStyle = '#d9e0e5';
   ctx.beginPath();
@@ -1965,6 +1975,9 @@ function PdfView({
   const [fromDate, setFromDate] = useState(today);
   const [toDate, setToDate] = useState(today);
   const [skipEmpty, setSkipEmpty] = useState(true);
+  const [showSidebar,setShowSidebar]=useState(false);
+  const [calendars,setCalendars]=useState<Subcalendar[]>([]);
+  const [sidebarIds,setSidebarIds]=useState<number[]>([]);
   const [loading, setLoading] = useState(false);
   const [jobs, setJobs] = useState<PdfJob[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
@@ -1977,6 +1990,12 @@ function PdfView({
       localStorage.removeItem(PDF_QUEUE_KEY);
     }
   }, []);
+  useEffect(()=>{
+    if(!connection || connection.demo){const d=CATEGORIES.map((name,index)=>({id:index+1,name:CATEGORY_META[name].label}));setCalendars(d);setSidebarIds(d.map(c=>c.id));return;}
+    let cancelled=false;
+    void api.post('/api/teamup/discover',{connection:{apiKey:connection.apiKey,calendarKey:connection.calendarKey}}).then(response=>{if(cancelled)return;const list=(response.data as {subcalendars?:Subcalendar[]}).subcalendars||[];setCalendars(list);setSidebarIds(list.map(c=>c.id));}).catch(()=>{if(!cancelled)notify({tone:'warn',text:'Cannot load calendar sidebar names; event export remains available.'});});
+    return ()=>{cancelled=true;};
+  },[connection?.apiKey,connection?.calendarKey,connection?.demo]);
   function persist(next: PdfJob[]) {
     setJobs(next);
     localStorage.setItem(PDF_QUEUE_KEY, JSON.stringify(next.slice(0, 20)));
@@ -2089,6 +2108,8 @@ function PdfView({
         notify({ tone: 'warn', text: 'ช่วงนี้ไม่มี Event ให้สร้าง PDF' });
         return;
       }
+      const sidebar:PdfSidebar={visible:showSidebar,ids:[...sidebarIds],calendars:[...calendars]};
+      pages.forEach(page=>{page.sidebar=sidebar;});
       const job: PdfJob = {
         id: `${Date.now()}`,
         start,
@@ -2096,6 +2117,7 @@ function PdfView({
         createdAt: new Date().toISOString(),
         pages,
         printIdentity,
+        sidebar,
       };
       persist([job, ...jobs].slice(0, 20));
       setSelected(current => Array.from(new Set([job.id, ...current])));
@@ -2129,6 +2151,7 @@ function PdfView({
           map.set(page.date, {
             ...page,
             printIdentity: job.printIdentity || fallbackIdentity,
+            sidebar: page.sidebar || job.sidebar,
           })
         )
       );
@@ -2227,6 +2250,7 @@ function PdfView({
             ชื่อปฏิทินมุมซ้ายจะดึงจาก Teamup อัตโนมัติ
           </small>
         </div>
+        <div style={{marginTop:16,padding:12,border:'1px solid #dce3e8',borderRadius:10}}><label className="remember-row"><input type="checkbox" checked={showSidebar} onChange={e=>setShowSidebar(e.target.checked)}/><span>Show Calendars sidebar in PDF</span></label>{showSidebar && <div><small>These checkboxes only control the sidebar labels, never the day-grid events.</small><div style={{display:'flex',gap:8,margin:'10px 0'}}><button type="button" className="secondary" onClick={()=>setSidebarIds(calendars.map(c=>c.id))}>Select all</button><button type="button" className="secondary" onClick={()=>setSidebarIds([])}>Clear</button></div>{calendars.map(cal=><label className="remember-row" key={cal.id}><input type="checkbox" checked={sidebarIds.includes(cal.id)} onChange={e=>setSidebarIds(old=>e.target.checked?[...old,cal.id]:old.filter(id=>id!==cal.id))}/><span>{cal.name}</span></label>)}</div>}</div>
         <div className="preset-row pdf-preset">
           <span>Print preset</span>
           <b>
@@ -2236,7 +2260,7 @@ function PdfView({
             <Check size={12} /> Eco
           </b>
           <b>
-            <Check size={12} /> Hide Sidebar
+            <Check size={12} /> {showSidebar ? "Selected Sidebar" : "Hide Sidebar"}
           </b>
           <b>
             <Check size={12} /> Portrait
