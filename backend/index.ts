@@ -22,6 +22,7 @@ type TeamupRawEvent = {
   end_dt?: unknown;
   all_day?: unknown;
   subcalendar_ids?: unknown;
+  subcalendar_id?: unknown;
 };
 const CATEGORIES: CategoryName[] = [
   'Outside',
@@ -140,10 +141,8 @@ function monthBounds(month: string) {
 }
 
 function eventCategories(value: unknown, mapping: Mapping) {
-  if (!Array.isArray(value)) return [] as CategoryName[];
-  return CATEGORIES.filter(category =>
-    value.some(item => Number(item) === mapping[category])
-  );
+  const ids = Array.isArray(value) ? value : value == null ? [] : [value];
+  return CATEGORIES.filter(category => ids.some(item => Number(item) === mapping[category]));
 }
 
 function validateEvents(value: unknown) {
@@ -449,9 +448,7 @@ export const handler = router({
             name: typeof item.name === 'string' ? item.name.trim() : '',
             readonly: item.readonly === true,
           }))
-          .filter(
-            item => Number.isFinite(item.id) && item.name && !item.readonly
-          );
+          .filter(item => Number.isFinite(item.id) && item.name);
         return json({
           calendarName,
           viewerName,
@@ -497,25 +494,29 @@ export const handler = router({
           title: string;
           categories: CategoryName[];
           allDay: boolean;
+          subcalendarIds: number[];
         }> = [];
         (response.events || []).forEach((raw, index) => {
-          const categories = eventCategories(raw.subcalendar_ids, mapping);
-          if (!categories.length) return;
+          const subcalendarIds = (Array.isArray(raw.subcalendar_ids) ? raw.subcalendar_ids : raw.subcalendar_id == null ? [] : [raw.subcalendar_id]).map(Number).filter(Number.isFinite);
+          const categories = eventCategories(subcalendarIds, mapping);
           const startValue = parseTeamupTime(raw.start_dt);
-          if (!startValue || !startValue.date.startsWith(`${month}-`)) return;
+          if (!startValue) return;
           const endValue = parseTeamupTime(raw.end_dt);
+          if (endValue && endValue.date < bounds.start) return;
+          if (startValue.date > bounds.end) return;
           const allDay =
             raw.all_day === true || raw.all_day === 1 || raw.all_day === '1';
-          const start = allDay ? 0 : startValue.minutes;
+          const date = startValue.date < bounds.start ? bounds.start : startValue.date;
+          const start = allDay || date !== startValue.date ? 0 : startValue.minutes;
           let end = allDay
             ? 1440
-            : endValue?.date === startValue.date
+            : endValue?.date === date
               ? endValue.minutes
               : 1440;
           if (end <= start) end = Math.min(1440, start + 1);
           events.push({
             id: String(raw.id ?? `event-${index}`),
-            date: startValue.date,
+            date,
             start,
             end,
             title:
@@ -524,6 +525,7 @@ export const handler = router({
                 : 'Untitled event',
             categories,
             allDay,
+            subcalendarIds,
           });
         });
         events.sort(
