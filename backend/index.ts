@@ -1,4 +1,4 @@
-import { ai, error, json, router } from '@appdeploy/sdk';
+import { ai, error, json, router, secrets } from '@appdeploy/sdk';
 
 type CategoryName =
   | 'Outside'
@@ -273,8 +273,105 @@ function normalizeOcr(data: unknown) {
   return rows;
 }
 
+
+const TEAMUP_LOCAL_BRIDGE = 'https://idjzkestgnbkybvlzwij.supabase.co/functions/v1/teamup-bridge';
+const LOCAL_AI_SITE_KEY = 'TEAMUP_LOCAL_SITE_KEY';
+const TRANSLATION_SYSTEM =
+  'Translate Thai or mixed Thai-English architecture, construction, design, meeting, and site-work descriptions into detailed English event titles. Preserve actions, systems, rooms, floors, objects, project context, and names. Translate คุณ as Khun. Do not invent details. Return titles in the same order.';
+const ATTENDANCE_SYSTEM =
+  'Read Thai employee attendance images accurately. Never invent missing times. Respect the exact source column.';
+const ATTENDANCE_PROMPT =
+  'Extract every visible dated row in a JSON object with monthLabel and records array. Dates as DD Mon YYYY or YYYY-MM-DD. Use ONLY the scanner-machine time column เวลาจากเครื่องสแกน to identify check-in/check-out. NEVER use HR calculated time column เวลาผ่านการคำนวณHR. Preserve visible overtime and outside-work remarks; overtime is not Leave. If missing return an empty string. Each record must contain date,checkIn,checkOut,note.';
+type QueuedAiJob = { jobId: string; token: string };
+
+async function callLocalBridge(op: string, payload: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  const names = await secrets.listSecretNames();
+  if (!names.includes(LOCAL_AI_SITE_KEY)) throw new Error('Public Local AI credential not configured.');
+  const siteKey = await secrets.readSecret(LOCAL_AI_SITE_KEY);
+  const response = await fetch(TEAMUP_LOCAL_BRIDGE, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-teamup-site-key': siteKey },
+    body: JSON.stringify({ op, ...payload }),
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!response.ok) throw new Error('Local AI bridge HTTP ' + response.status);
+  const data: unknown = await response.json();
+  if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Local AI bridge returned non-object.');
+  return data as Record<string, unknown>;
+}
+
+async function submitLocalFirst(
+  action: 'translate_work_lines' | 'attendance_ocr',
+  payload: Record<string, unknown>
+): Promise<QueuedAiJob | null> {
+  try {
+    const worker = await callLocalBridge('worker_status');
+    if (worker.online !== true) return null;
+    const reply = await callLocalBridge('submit', { action, payload });
+    if (typeof reply.jobId !== 'string' || typeof reply.token !== 'string') return null;
+    return { jobId: reply.jobId, token: reply.token };
+  } catch (caught) {
+    console.warn('Local AI unavailable; using cloud AI backup.', caught instanceof Error ? caught.message : 'unknown');
+    return null;
+  }
+}
+
+function normalizedLocalOcr(value: unknown) {
+  const result = (value || {}) as { records?: unknown };
+  if (!Array.isArray(result.records)) return [];
+  const rows = result.records.map(record => {
+    const item = (record || {}) as Record<string, unknown>;
+    const checkIn = typeof item.checkIn === 'string' && /^(?:[01]?\d|2[0-3]):[0-5]\d$/.test(item.checkIn) ? item.checkIn : '';
+    const checkOut = typeof item.checkOut === 'string' && /^(?:[01]?\d|2[0-3]):[0-5]\d$/.test(item.checkOut) ? item.checkOut : '';
+    return {
+      date: typeof item.date === 'string' ? item.date : '',
+      scannerText: [checkIn, checkOut].filter(Boolean).join(' '),
+      note: typeof item.note === 'string' ? item.note : '',
+    };
+  });
+  return normalizeOcr({ records: rows });
+}
+
 export const handler = router({
   'GET /api/_healthcheck': [async () => json({ message: 'Success' })],
+  'GET /api/local-ai/status': [async () => {
+    try {
+      const worker = await callLocalBridge('worker_status');
+      return json({ mode: 'LOCAL_FIRST', localOnline: worker.online === true });
+    } catch {
+      return json({ mode: 'LOCAL_FIRST', localOnline: false });
+    }
+  }],
+  'POST /api/ai/job-status': [async ({ body }) => {
+    const payload = (body || {}) as { jobId?: unknown; token?: unknown };
+    if (typeof payload.jobId !== 'string' || typeof payload.token !== 'string' ||
+        !/^[0-9a-f-]{36}$/i.test(payload.jobId) || !/^[0-9a-f-]{36}$/i.test(payload.token)) {
+      return error('Invalid Local AI job reference.', 400);
+    }
+    try {
+      const state = await callLocalBridge('status', { jobId: payload.jobId, token: payload.token });
+      if (state.status === 'completed') {
+        const result = (state.result || {}) as Record<string, unknown>;
+        if (Array.isArray(result.records)) {
+          const records = normalizedLocalOcr(result);
+          if (!records.length) return json({ status: 'failed', message: 'No readable scanner-time rows.' });
+          return json({ status: 'completed', result: { records } });
+        }
+        if (Array.isArray(result.titles)) {
+          const titles = result.titles;
+          if (!titles.length || titles.some(title => typeof title !== 'string' || !title.trim())) {
+            return json({ status: 'failed', message: 'Local AI translation output invalid.' });
+          }
+          return json({ status: 'completed', result: { titles } });
+        }
+        return json({ status: 'failed', message: 'Local AI output invalid.' });
+      }
+      if (state.status === 'failed') return json({ status: 'failed', message: 'Local AI worker failed to process the request.' });
+      return json({ status: 'pending' }, 202);
+    } catch {
+      return json({ status: 'failed', message: 'Local AI worker connection lost.' });
+    }
+  }],
 
   'POST /api/teamup/discover': [
     async ({ body }) => {
@@ -287,38 +384,65 @@ export const handler = router({
         );
       try {
         await checkApiKey(connection.apiKey);
-        let subcalendars: Array<{
-          id?: unknown;
+        type CalendarConfiguration = {
+          identity?: { title?: unknown };
+          user?: {
+            name?: unknown;
+            username?: unknown;
+            display_name?: unknown;
+            email?: unknown;
+          } | null;
+          link?: { name?: unknown } | null;
+          date_time?: { tz?: unknown };
           name?: unknown;
-          active?: unknown;
-          readonly?: unknown;
-        }> = [];
-        let calendarName = 'Teamup Calendar';
+          subcalendars?: Array<{
+            id?: unknown;
+            name?: unknown;
+            active?: unknown;
+            readonly?: unknown;
+          }>;
+        };
+        let configuration: CalendarConfiguration | undefined;
         try {
-          const response = await teamupRequest<{
+          const result = await teamupRequest<{
+            configuration?: CalendarConfiguration;
+          }>(connection, '/configuration');
+          configuration = result.configuration;
+        } catch (caught) {
+          if (
+            !(caught instanceof TeamupError) ||
+            (caught.status !== 403 && caught.status !== 404)
+          )
+            throw caught;
+        }
+        let subcalendars = configuration?.subcalendars || [];
+        try {
+          const result = await teamupRequest<{
             subcalendars?: typeof subcalendars;
           }>(connection, '/subcalendars?includeInactive=false');
-          subcalendars = Array.isArray(response.subcalendars)
-            ? response.subcalendars
-            : [];
+          if (Array.isArray(result.subcalendars))
+            subcalendars = result.subcalendars;
         } catch (caught) {
-          if (!(caught instanceof TeamupError) || caught.status !== 403)
-            throw caught;
-          const response = await teamupRequest<{
-            configuration?: {
-              name?: unknown;
-              subcalendars?: typeof subcalendars;
-            };
-          }>(connection, '/configuration');
-          subcalendars = Array.isArray(response.configuration?.subcalendars)
-            ? response.configuration?.subcalendars || []
-            : [];
           if (
-            typeof response.configuration?.name === 'string' &&
-            response.configuration.name.trim()
+            !(caught instanceof TeamupError) ||
+            caught.status !== 403 ||
+            !Array.isArray(configuration?.subcalendars)
           )
-            calendarName = response.configuration.name.trim();
+            throw caught;
         }
+        const clean = (value: unknown) =>
+          typeof value === 'string' ? value.trim() : '';
+        const calendarName =
+          clean(configuration?.identity?.title) ||
+          clean(configuration?.name) ||
+          'Teamup Calendar';
+        const viewerName =
+          clean(configuration?.user?.name) ||
+          clean(configuration?.user?.display_name) ||
+          clean(configuration?.user?.username);
+        const viewerEmail = clean(configuration?.user?.email);
+        const linkName = clean(configuration?.link?.name);
+        const timeZone = clean(configuration?.date_time?.tz) || TIMEZONE;
         const usable = subcalendars
           .map(item => ({
             id: Number(item.id),
@@ -328,7 +452,14 @@ export const handler = router({
           .filter(
             item => Number.isFinite(item.id) && item.name && !item.readonly
           );
-        return json({ calendarName, subcalendars: usable });
+        return json({
+          calendarName,
+          viewerName,
+          viewerEmail,
+          linkName,
+          timeZone,
+          subcalendars: usable,
+        });
       } catch (caught) {
         const diagnosis = describeTeamupError(caught);
         return error(diagnosis.message, diagnosis.status);
@@ -469,7 +600,7 @@ export const handler = router({
 
   'POST /api/translate-work-lines': [
     async ({ body }) => {
-      const payload = body as { lines?: unknown };
+      const payload = body as { lines?: unknown; forceAppDeploy?: boolean };
       if (
         !Array.isArray(payload.lines) ||
         payload.lines.length === 0 ||
@@ -481,6 +612,13 @@ export const handler = router({
       );
       if (lines.some(line => !line || line.length > 500))
         return error('Each work line must be 1-500 characters.', 400);
+      if (payload.forceAppDeploy !== true) {
+        const local = await submitLocalFirst('translate_work_lines', {
+          system: TRANSLATION_SYSTEM,
+          prompt: JSON.stringify({ lines }),
+        });
+        if (local) return json({ pending: true, ...local, provider: 'LOCAL' }, 202);
+      }
       try {
         const result = await ai.generate({
           system:
@@ -521,9 +659,17 @@ export const handler = router({
 
   'POST /api/attendance/ocr': [
     async ({ body }) => {
-      const payload = body as { image?: { data?: string; mimeType?: string } };
+      const payload = body as { image?: { data?: string; mimeType?: string }; forceAppDeploy?: boolean };
       if (!payload.image?.data || !payload.image.mimeType)
         return error('Attendance image is required.', 400);
+      if (payload.forceAppDeploy !== true) {
+        const local = await submitLocalFirst('attendance_ocr', {
+          system: ATTENDANCE_SYSTEM,
+          prompt: ATTENDANCE_PROMPT,
+          images: [{ data: payload.image.data, mimeType: payload.image.mimeType }],
+        });
+        if (local) return json({ pending: true, ...local, provider: 'LOCAL' }, 202);
+      }
       try {
         const result = await ai.ocr({
           images: [
@@ -539,7 +685,9 @@ export const handler = router({
           prompt:
             'Extract every visible dated row. Return date preferably as DD Mon YYYY or YYYY-MM-DD. scannerText must contain only the actual check-in/check-out scanner times for that row. note contains visible leave/overtime/outside-work text if present. If a value is missing return an empty string.',
         });
-        return json({ records: normalizeOcr(result.data) });
+        const records = normalizeOcr(result.data);
+        if (!records.length) return error('No scanner rows could be detected in the image.', 422);
+        return json({ records });
       } catch {
         return error('Could not read attendance screenshot.', 500);
       }

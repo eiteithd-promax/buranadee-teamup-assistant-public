@@ -44,7 +44,7 @@ Expected: At least one attendance row shows a check-in/check-out pair and Schedu
 
 ## Test 4 - Generate two PDF batches and merge them
 Viewport: desktop
-Covers: PDF natural-language date range, Demo event source, PDF generation, PDF Queue persistence, PDF merge and date ordering
+Covers: PDF natural-language date range, Demo event source, Teamup-style calendar/user header and Powered by Teamup footer, per-batch identity persistence, PDF Queue, PDF merge and date ordering
 Description: Verifies the public PDF workflow can interpret a Thai command, create queued batches, and merge selected batches without requiring external credentials.
 
 Setup:
@@ -53,9 +53,11 @@ Setup:
 Steps:
 1. Open "PDF Export", enter `ช่วยปริ้น ตั้งแต่วันที่ 20 AUG จนถึงล่าสุด`, click "Read Command", then click "Generate PDF"
 2. Change the range to a second short date range and click "Generate PDF" again
-3. Select both queue batches and click "Merge Selected"
+3. Enter 'Thanawat' in the optional top-right print name field and click "Generate PDF" for a short second range
+4. Select both queue batches and click "Merge Selected"
+5. Inspect generated and merged PDF pages, including header and footer, when supported by the browser PDF viewer
 
-Expected: Two PDF batches remain visible in PDF Queue, and merging completes with a visible success message that reports the combined page count.
+Expected: Two PDF batches remain visible in PDF Queue, and merging completes with the combined page count. PDF pages show the Teamup calendar title at top left, the effective account label (including 'Thanawat' on the second demo batch) at top right, timezone and 'Powered by teamup' at bottom right; the former BURANADEE header/footer strings are absent. Earlier batches retain their own account name after the print-name field changes.
 
 ## Test 5 - Reject a failed Teamup connection and keep the Guide usable
 Viewport: mobile
@@ -80,3 +82,13 @@ Steps:
 3. Expand one FAQ item and review the credential note
 
 Expected: Setup clearly reports the connection failure, while the Guide remains readable on mobile and explains that Public Edition uses each user's own Teamup connection.
+## Test 6 - Private-style public workspace with per-user credentials
+Viewport: desktop
+Covers: Home navigation, Calendar, PDF Export, Attendance, Settings, category editor, Day Preview, no private owner identity, public Teamup credential isolation
+Description: Verifies the Public workspace matches the Private UI while keeping user connections separate.
+Steps:
+1. Enter Try Demo without Teamup
+2. Confirm sidebar has Home, Calendar, PDF Export, Attendance, Settings, and the topbar displays Demo User rather than a private owner name
+3. Generate a schedule, edit an event category, review Day Preview and lunch lock
+4. Open Settings, check Local AI First status and that Configure and Guide controls remain available
+Expected: Private-style sidebar, topbar and panels render with generic identity; Demo cannot write real Teamup events; all five workspace tabs are navigable and official Public PDF footer remains available.
