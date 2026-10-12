@@ -275,8 +275,37 @@ function normalizeOcr(data: unknown) {
 
 const TEAMUP_LOCAL_BRIDGE = 'https://idjzkestgnbkybvlzwij.supabase.co/functions/v1/teamup-bridge';
 const LOCAL_AI_SITE_KEY = 'TEAMUP_LOCAL_SITE_KEY';
-const TRANSLATION_SYSTEM =
-  'Translate Thai or mixed Thai-English architecture, construction, design, meeting, and site-work descriptions into detailed English event titles. Preserve actions, systems, rooms, floors, objects, project context, and names. Translate คุณ as Khun. Do not invent details. Return titles in the same order.';
+const TRANSLATION_SYSTEM = [
+  'Translate entire Thai architecture and construction work notes into natural precise English calendar event titles.',
+  'Preserve all actions, names, sites, technical work, people, rooms, floors and project context; never summarize as Work Construction.',
+  'Use relevant hints of terms and approved example translations in the supplied prompt.',
+  'Translate คุณ as Khun. Thai names are transliterated; วัดไทร is Wat Sai.',
+  'Example: ไปหน้างาน งานวัดไทร ประกอบงานโครงสร้าง -> Site Visit – Wat Sai Project – Structural Assembly Work.',
+  'Return JSON with a titles array, one complete English title per source line, in source order.'
+].join(' ');
+function translationComplete(source: string, title: unknown) {
+  if (typeof title !== 'string' || !title.trim() || /[ก-๙]/.test(title)) return false;
+  if (source.length > 26 && (title.match(/[A-Za-z]+/g) || []).length < 5) return false;
+  if (/^(work|work construction|work constrction|site work|on-site work|job routine)$/i.test(title.trim())) return false;
+  const rules: Array<[RegExp, RegExp]> = [
+    [/หน้างาน/,/site|field|jobsite/i],
+    [/โครงสร้าง/,/structur|framing/i],
+    [/ติดตั้ง|ประกอบ/,/install|assembl|erect|fabricat/i],
+    [/ตรวจงาน/,/inspect|check|review/i],
+    [/ประชุม/,/meet|discuss|coordinat/i],
+    [/เขียนแบบ|ทำแบบ|แก้แบบ/,/draw|design|draft|revis|plan/i],
+    [/ระบบแอร์/,/air.condition|hvac/i],
+    [/ห้องซักรีด/,/laundry/i],
+    [/งานวัดไทร/,/wat sai/i]
+  ];
+  const names = source.match(/\\b[A-Z][A-Za-z0-9-]{2,}\\b/g) || [];
+  if (names.some(name => !title.toLowerCase().includes(name.toLowerCase()))) return false;
+  return rules.every(([thai,english]) => !thai.test(source) || english.test(title));
+}
+function translationsComplete(lines: string[], titles: unknown) {
+  return Array.isArray(titles) && titles.length === lines.length &&
+    titles.every((item,index)=>translationComplete(lines[index],item));
+}
 const ATTENDANCE_SYSTEM =
   'Read Thai employee attendance images accurately. Never invent missing times. Respect the exact source column.';
 const ATTENDANCE_PROMPT =
@@ -342,7 +371,7 @@ export const handler = router({
     }
   }],
   'POST /api/ai/job-status': [async ({ body }) => {
-    const payload = (body || {}) as { jobId?: unknown; token?: unknown };
+    const payload = (body || {}) as { jobId?: unknown; token?: unknown; lines?: unknown };
     if (typeof payload.jobId !== 'string' || typeof payload.token !== 'string' ||
         !/^[0-9a-f-]{36}$/i.test(payload.jobId) || !/^[0-9a-f-]{36}$/i.test(payload.token)) {
       return error('Invalid Local AI job reference.', 400);
@@ -357,11 +386,10 @@ export const handler = router({
           return json({ status: 'completed', result: { records } });
         }
         if (Array.isArray(result.titles)) {
-          const titles = result.titles;
-          if (!titles.length || titles.some(title => typeof title !== 'string' || !title.trim())) {
-            return json({ status: 'failed', message: 'Local AI translation output invalid.' });
-          }
-          return json({ status: 'completed', result: { titles } });
+          const lines = Array.isArray(payload.lines) ? payload.lines.filter((item):item is string=>typeof item==='string') : [];
+          if (!result.titles.length || (lines.length > 0 && !translationsComplete(lines,result.titles)))
+            return json({status:'failed',message:'Incomplete local translation'});
+          return json({status:'completed',result:{titles:result.titles}});
         }
         return json({ status: 'failed', message: 'Local AI output invalid.' });
       }
@@ -602,7 +630,7 @@ export const handler = router({
 
   'POST /api/translate-work-lines': [
     async ({ body }) => {
-      const payload = body as { lines?: unknown; forceAppDeploy?: boolean };
+      const payload = body as { lines?: unknown; hints?: unknown; forceAppDeploy?: boolean };
       if (
         !Array.isArray(payload.lines) ||
         payload.lines.length === 0 ||
@@ -617,42 +645,27 @@ export const handler = router({
       if (payload.forceAppDeploy !== true) {
         const local = await submitLocalFirst('translate_work_lines', {
           system: TRANSLATION_SYSTEM,
-          prompt: JSON.stringify({ lines }),
+          prompt: JSON.stringify({ lines, hints: payload.hints }),
         });
         if (local) return json({ pending: true, ...local, provider: 'LOCAL' }, 202);
       }
       try {
-        const result = await ai.generate({
-          system:
-            'Translate Thai or mixed Thai-English architecture, construction, design, meeting, and site-work descriptions into concise but detailed English calendar event titles. Preserve actions, systems, rooms, floors, objects, project context, and names. Translate คุณ as Khun. Do not invent details. Return titles in the same order.',
-          prompt: JSON.stringify({ lines }),
-          schema: {
-            type: 'object',
-            properties: {
-              titles: { type: 'array', items: { type: 'string' } },
-            },
-            required: ['titles'],
-          },
-          thinkingMode: 'FAST',
-          temperature: 0.1,
-          maxTokens: 2400,
-        });
-        const parsed = JSON.parse(
-          result.text
-            .trim()
-            .replace(/^```json\s*/i, '')
-            .replace(/```$/i, '')
-        ) as { titles?: unknown };
-        if (
-          !Array.isArray(parsed.titles) ||
-          parsed.titles.length !== lines.length
-        )
-          return error('Unexpected translation result.', 502);
-        return json({
-          titles: parsed.titles.map(item =>
-            typeof item === 'string' ? item.trim().slice(0, 500) : ''
-          ),
-        });
+        let rejected: unknown = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const result = await ai.generate({
+            system: TRANSLATION_SYSTEM,
+            prompt: JSON.stringify({lines,hints:payload.hints,rejected}),
+            schema: {type:'object',properties:{titles:{type:'array',items:{type:'string'}}},required:['titles']},
+            thinkingMode: 'FAST', temperature: 0.15, maxTokens: 3000,
+          });
+          let titles:unknown = [];
+          try { const raw=result.text.trim();titles=(JSON.parse(raw.slice(raw.indexOf('{'),raw.lastIndexOf('}')+1)) as {titles?:unknown}).titles; }
+          catch { titles=[]; }
+          if (translationsComplete(lines,titles))
+            return json({titles:(titles as string[]).map(item=>item.trim().slice(0,500))});
+          rejected=titles;
+        }
+        return error('Translation omitted details. Please retry.',502);
       } catch {
         return error('Detailed translation is temporarily unavailable.', 502);
       }
