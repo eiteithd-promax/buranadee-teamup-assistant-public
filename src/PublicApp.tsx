@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api, image } from '@appdeploy/client';
-import { PDFDocument } from 'pdf-lib';
+import { DEFAULT_TEAMUP_PRINT, createTeamupPdf, renderTeamupPreview, type TeamupPrintOptions } from './teamupPrint';
+import { translationMemoryKey, emptyTranslationStore, loadTranslationStore, persistTranslationStore, findApprovedTranslation, approveTranslation, translationHints, addTerm, importTranslationData, exportTranslationData, type TranslationStore } from './translationMemory';
 import {
   ArrowRight,
   BookOpen,
@@ -70,7 +71,7 @@ type TeamupEvent = {
   subcalendarIds?: number[];
 };
 
-type Subcalendar = { id: number; name: string; readonly?: boolean };
+type Subcalendar = { id: number; name: string; readonly?: boolean; color?: string };
 type Mapping = Record<CategoryName, number>;
 type Connection = {
   apiKey: string;
@@ -101,6 +102,7 @@ type PdfDay = {
 };
 type PdfSidebar = { visible:boolean; ids:number[]; calendars:Subcalendar[] };
 type PdfJob = {
+  printOptions?: TeamupPrintOptions;
   id: string;
   start: string;
   end: string;
@@ -690,137 +692,20 @@ function FeatureCard({
   );
 }
 
-function renderPdfCanvas(day: PdfDay, fallbackIdentity: PdfPrintIdentity) {
-  const identity = day.printIdentity || fallbackIdentity;
-  const canvas = document.createElement('canvas');
-  canvas.width = 1000;
-  canvas.height = 1414;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas unavailable');
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(0, 0, 1000, 1414);
-  ctx.fillStyle = '#172330';
-  ctx.font = '700 28px Arial, sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText(identity.calendarTitle || 'Teamup Schedule', 54, 64, 610);
-  if (identity.accountLabel) {
-    ctx.font = '15px Arial, sans-serif';
-    ctx.textAlign = 'right';
-    ctx.fillText(identity.accountLabel, 946, 62, 262);
-    ctx.textAlign = 'left';
-  }
-  ctx.strokeStyle = '#d9e0e5';
-  ctx.beginPath();
-  ctx.moveTo(54, 84);
-  ctx.lineTo(946, 84);
-  ctx.stroke();
-  ctx.fillStyle = '#253744';
-  ctx.font = '700 18px Arial, sans-serif';
-  ctx.fillText(fullDate(day.date), 70, 124);
-  const top = 190;
-  const bottom = 1300;
-  const sidebarEntries = day.sidebar?.visible ? day.sidebar.calendars.filter(c => day.sidebar!.ids.includes(c.id)) : [];
-  if (sidebarEntries.length) { ctx.font='700 14px Arial'; ctx.fillStyle='#263844'; ctx.fillText('Calendars',60,170);
-    sidebarEntries.slice(0,30).forEach((c,i)=>{const y=189+i*30;const cat=CATEGORIES.find(k=>c.name.toLowerCase().includes(k.toLowerCase()));const color=cat?CATEGORY_META[cat].color:'#1689aa';ctx.fillStyle=color;ctx.fillRect(60,y,6,22);ctx.strokeStyle=color;ctx.strokeRect(60,y,196,22);ctx.font='12px Arial';ctx.fillStyle='#263844';ctx.fillText(c.name,71,y+16,180);});
-  }
-  const left = sidebarEntries.length ? 282 : 76;
-  const right = 930;
-  const timed = day.events.filter(e=>!e.allDay);
-  const startHour = timed.length ? Math.max(0,Math.min(8,Math.floor(Math.min(...timed.map(e=>e.start))/60))) : 8;
-  const endHour = timed.length ? Math.min(24,Math.max(20,Math.ceil(Math.max(...timed.map(e=>e.end))/60))) : 20;
-  const minuteHeight = (bottom - top) / ((endHour - startHour) * 60);
-  for (let hour = startHour; hour <= endHour; hour += 1) {
-    const y = top + (hour - startHour) * 60 * minuteHeight;
-    ctx.strokeStyle = '#d7dde2';
-    ctx.beginPath();
-    ctx.moveTo(left, y);
-    ctx.lineTo(right, y);
-    ctx.stroke();
-    if (hour < endHour) {
-      ctx.fillStyle = '#53626e';
-      ctx.font = '13px Arial, sans-serif';
-      ctx.fillText(`${String(hour).padStart(2, '0')}:00`, 72, y + 4);
-    }
-  }
-  const allDayEvents=day.events.filter(e=>e.allDay);
-  if(allDayEvents.length){ctx.font='700 12px Arial';ctx.fillStyle='#263844';ctx.fillText('All day: '+allDayEvents.map(e=>e.title).join(' | '),left,168,right-left);}
-  timed.forEach(event => {
-      const start = Math.max(event.start, startHour * 60);
-      const end = Math.min(event.end, endHour * 60);
-      if (end <= start) return;
-      const y = top + (start - startHour * 60) * minuteHeight;
-      const height=Math.max(15,(end-start)*minuteHeight);
-      const overlap=timed.filter(other=>other.start<event.end && other.end>event.start);
-      const width=(right-left)/Math.max(1,overlap.length);
-      const x=left+Math.max(0,overlap.findIndex(other=>other.id===event.id))*width;
-      ctx.fillStyle = '#fff';
-      ctx.strokeStyle = '#cbd5dc';
-      ctx.fillRect(x, y + 1, width, Math.max(12,height - 2));
-      ctx.strokeRect(x, y + 1, width, Math.max(12,height - 2));
-      const category = event.categories[0] || 'Job Routine';
-      ctx.fillStyle = CATEGORY_META[category].color;
-      ctx.fillRect(x, y + 1, 5, Math.max(12,height - 2));
-      ctx.fillStyle = '#263844';
-      ctx.font = '700 12px Arial, sans-serif';
-      const label = `${formatTime(event.start)}  ${event.title}`;
-      const maxChars = 105;
-      ctx.fillText(
-        label.length > maxChars ? `${label.slice(0, maxChars)}…` : label,
-        x+10, y+Math.min(16,height-2), Math.max(10,width-15));
-    });
-  ctx.strokeStyle = '#d9e0e5';
-  ctx.beginPath();
-  ctx.moveTo(54, 1340);
-  ctx.lineTo(946, 1340);
-  ctx.stroke();
-  const zone = identity.timeZone.split('/').pop()?.replace(/_/g, ' ') || '';
-  ctx.textAlign = 'right';
-  ctx.font = '14px Arial, sans-serif';
-  ctx.fillStyle = '#1689aa';
-  if (zone) ctx.fillText(zone, 742, 1376, 165);
-  ctx.fillStyle = '#788792';
-  ctx.fillText('Powered by', 842, 1376);
-  ctx.fillStyle = '#30475a';
-  for (let row = 0; row < 3; row += 1) {
-    for (let col = 0; col < 3; col += 1) {
-      ctx.fillRect(851 + col * 7, 1357 + row * 7, 4, 4);
-    }
-  }
-  ctx.font = '700 19px Arial, sans-serif';
-  ctx.fillText('teamup', 946, 1377);
-  return canvas;
+async function makePdf(days: PdfDay[], identity: PdfPrintIdentity, options: TeamupPrintOptions = DEFAULT_TEAMUP_PRINT) {
+  return createTeamupPdf(days, identity, options);
 }
-
-async function makePdf(days: PdfDay[], identity: PdfPrintIdentity) {
-  const document = await PDFDocument.create();
-  for (const day of days) {
-    const png = await document.embedPng(
-      renderPdfCanvas(day, identity).toDataURL('image/png')
-    );
-    const page = document.addPage([595.28, 841.89]);
-    page.drawImage(png, { x: 0, y: 0, width: 595.28, height: 841.89 });
-  }
-  return document.save();
-}
-
-async function downloadPdf(
-  days: PdfDay[],
-  filename: string,
-  identity: PdfPrintIdentity
-) {
-  const bytes = await makePdf(days, identity);
-  const url = URL.createObjectURL(
-    new Blob([bytes], { type: 'application/pdf' })
-  );
+async function downloadPdf(days: PdfDay[], filename: string, identity: PdfPrintIdentity, options: TeamupPrintOptions = DEFAULT_TEAMUP_PRINT) {
+  const bytes = await makePdf(days, identity, options);
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
   document.body.appendChild(link);
   link.click();
   link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1200);
+  window.setTimeout(() => URL.revokeObjectURL(url), 15000);
 }
-
 function printIdentityFromConnection(connection: Connection | null): PdfPrintIdentity {
   return {
     calendarTitle: connection?.calendarName?.trim() || 'Teamup Calendar',
@@ -901,6 +786,31 @@ function PublicApp() {
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [localOnline, setLocalOnline] = useState<boolean | null>(null);
+  const [translationStore, setTranslationStore] = useState<TranslationStore>(emptyTranslationStore);
+  const [translationKey, setTranslationKey] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    setTranslationKey(null);
+    setTranslationStore(emptyTranslationStore());
+    void translationMemoryKey(connection).then(key => {
+      if (!active) return;
+      setTranslationKey(key);
+      setTranslationStore(loadTranslationStore(key));
+    }).catch(() => setToast({tone:'warn',text:'Translation Memory unavailable on this browser'}));
+    return () => { active = false; };
+  }, [connection?.apiKey, connection?.calendarKey]);
+  function saveTranslationStore(next: TranslationStore) {
+    if (!translationKey) return;
+    setTranslationStore(next);
+    persistTranslationStore(translationKey, next);
+  }
+  function editTranslation(id: string, title: string) {
+    const source = events.find(event => event.id === id)?.source;
+    if (!source || !title.trim()) return;
+    saveTranslationStore(approveTranslation(translationStore, source, title));
+    setEvents(current => current.map(event => event.source === source ? {...event,title} : event));
+    setSubmitted(false);
+  }
 
   useEffect(() => {
     const stored =
@@ -984,18 +894,25 @@ function PublicApp() {
     setSubmitted(false);
     try {
       const sources = Array.from(new Set(parsed.events.map(event => event.source).filter(Boolean)));
-      let translations = new Map<string, string>();
-      try {
-        const result = await requestAiLocalFirst<{ titles?: string[] }>('/api/translate-work-lines', { lines: sources });
-        const titles = Array.isArray(result.titles) ? result.titles : [];
-        translations = new Map(sources.map((source, index) => [source, titles[index] || '']));
-      } catch (caught) {
-        console.warn('AI translation unavailable; using deterministic titles.', caught);
-        setToast({ tone: 'warn', text: 'AI แปลภาษาไม่พร้อม ใช้คำแปลสำรองที่ไม่เพิ่มข้อมูลเอง' });
+      const pending = sources.filter(source => !findApprovedTranslation(translationStore, source));
+      const translations = new Map<string,string>();
+      sources.forEach(source => {
+        const approved = findApprovedTranslation(translationStore,source);
+        if (approved) translations.set(source,approved);
+      });
+      let warning = false;
+      if (pending.length) {
+        try {
+          const hints = pending.map(source => translationHints(translationStore,source));
+          const result = await requestAiLocalFirst<{titles?:string[]}>('/api/translate-work-lines',{lines:pending,hints});
+          const titles = result.titles || [];
+          if (titles.length !== pending.length || titles.some(title => !title.trim())) throw new Error('Incomplete translation');
+          pending.forEach((source,i) => translations.set(source,titles[i]));
+        } catch (caught) { console.warn('Translation unavailable',caught); warning = true; }
       }
-      setEvents(parsed.events.map(event => ({ ...event, title: translations.get(event.source) || event.title })));
+      setEvents(parsed.events.map(event => ({...event,title:translations.get(event.source)||event.source})));
       setCalendarReference(parsed.events[0].date);
-      setToast({ tone: 'ok', text: 'สร้าง ' + parsed.events.length + ' Event แล้ว ตรวจ Preview ก่อนส่ง Teamup' });
+      setToast(warning ? {tone:'warn',text:'AI แปลไม่สำเร็จ แสดงข้อความไทยต้นฉบับเต็มแทน'} : { tone: 'ok', text: 'สร้าง ' + parsed.events.length + ' Event แล้ว ตรวจ Preview ก่อนส่ง Teamup' });
     } finally {
       setGenerating(false);
     }
@@ -1199,6 +1116,7 @@ function PublicApp() {
             onGenerate={() => void generateSchedule()}
             onSubmit={() => void submitEvents()}
             onToggleCategory={toggleEventCategory}
+            onEditTranslation={editTranslation}
             onOpenAttendance={() => setView('attendance')}
             demo={Boolean(connection?.demo)}
             generating={generating}
@@ -1215,6 +1133,35 @@ function PublicApp() {
             onSync={() => void syncCalendar()}
           />
         )}
+        {view === 'schedule' && <div className="panel translation-memory-panel">
+  <div className="panel-heading"><div><h2>Translation Memory</h2><p>Local, private to this device and Teamup calendar connection</p></div></div>
+  <p>{translationStore.entries.length} approved phrases · {translationStore.terms.length} custom terms</p>
+  <div className="memory-form"><input id="teamup-term-thai" placeholder="Thai construction term"/><input id="teamup-term-english" placeholder="Approved English"/>
+    <button className="secondary" onClick={()=>{
+      const thai=document.querySelector<HTMLInputElement>('#teamup-term-thai');
+      const english=document.querySelector<HTMLInputElement>('#teamup-term-english');
+      if(!thai?.value.trim()||!english?.value.trim())return;
+      saveTranslationStore(addTerm(translationStore,thai.value,english.value));
+      thai.value='';english.value='';
+    }}>Save term</button>
+  </div>
+  <div className="memory-actions">
+    <label className="secondary memory-upload">Import CSV / JSON<input type="file" accept=".csv,.json" onChange={async e=>{
+      const file=e.target.files?.[0];if(!file)return;
+      try{const result=importTranslationData(translationStore,await file.text(),file.name);
+        saveTranslationStore(result.store);
+        setToast({tone:'ok',text:'Imported '+result.count+' approved translations / terms'});
+      }catch{setToast({tone:'error',text:'Invalid translation memory file'});}
+      e.target.value='';
+    }}/></label>
+    <button className="secondary" onClick={()=>{
+      const url=URL.createObjectURL(new Blob([exportTranslationData(translationStore)],{type:'application/json'}));
+      const anchor=document.createElement('a');anchor.href=url;anchor.download='teamup-translation-memory.json';anchor.click();
+      window.setTimeout(()=>URL.revokeObjectURL(url),15000);
+    }}>Export Memory</button>
+  </div>
+  <p>Approved translations are reused exactly; similar examples and terms guide Local AI first.</p>
+</div>}
         {view === 'attendance' && <AttendanceView rows={attendanceRows} setRows={setAttendanceRows} onUse={() => setView('schedule')} notify={setToast} />}
         {view === 'pdf' && <PdfView connection={connection} notify={setToast} onPrintNameChange={updatePrintName} />}
         {view === 'settings' && (
@@ -1598,7 +1545,7 @@ function Setup({
 
 function ScheduleView({
   input, setInput, events, attendanceRows, onGenerate, onSubmit,
-  onToggleCategory, onOpenAttendance, demo, generating, submitting, submitted,
+  onToggleCategory, onEditTranslation, onOpenAttendance, demo, generating, submitting, submitted,
 }: {
   input: string;
   setInput: (value: string) => void;
@@ -1607,6 +1554,7 @@ function ScheduleView({
   onGenerate: () => void;
   onSubmit: () => void;
   onToggleCategory: (id: string, category: CategoryName) => void;
+  onEditTranslation: (id: string, title: string) => void;
   onOpenAttendance: () => void;
   demo: boolean;
   generating: boolean;
@@ -1674,6 +1622,10 @@ function ScheduleView({
                 <div className="event-time"><em>{friendlyDate(event.date)}</em><b>{formatTime(event.start)}</b><span>{formatTime(event.end)}</span></div>
                 <div className="event-body">
                   <h3>{event.title}</h3>
+                  <label className="translation-review">Edit English title
+                    <input aria-label={'Edit translation for '+event.source} defaultValue={event.title} key={event.id+'-'+event.title}
+                      onBlur={e=>{if(e.target.value.trim() && e.target.value !== event.title)onEditTranslation(event.id,e.target.value.trim());}} />
+                  </label>
                   <div className="pill-row">{event.categories.map(category => <CategoryPill key={category} name={category} />)}</div>
                   <small>Original: {event.source}</small>
                 </div>
@@ -1976,6 +1928,10 @@ function PdfView({
   const [toDate, setToDate] = useState(today);
   const [skipEmpty, setSkipEmpty] = useState(true);
   const [showSidebar,setShowSidebar]=useState(false);
+  const [printOptions,setPrintOptions]=useState<TeamupPrintOptions>({...DEFAULT_TEAMUP_PRINT});
+  const [previewUrl,setPreviewUrl]=useState('');
+  const [previewDays,setPreviewDays]=useState<PdfDay[]>([]);
+  const [previewIdentity,setPreviewIdentity]=useState<PdfPrintIdentity|null>(null);
   const [calendars,setCalendars]=useState<Subcalendar[]>([]);
   const [sidebarIds,setSidebarIds]=useState<number[]>([]);
   const [loading, setLoading] = useState(false);
@@ -2109,6 +2065,7 @@ function PdfView({
         return;
       }
       const sidebar:PdfSidebar={visible:showSidebar,ids:[...sidebarIds],calendars:[...calendars]};
+      const currentPrintOptions={...printOptions,showLegend:showSidebar,legendIds:[...sidebarIds]};
       pages.forEach(page=>{page.sidebar=sidebar;});
       const job: PdfJob = {
         id: `${Date.now()}`,
@@ -2118,10 +2075,14 @@ function PdfView({
         pages,
         printIdentity,
         sidebar,
+        printOptions:currentPrintOptions,
       };
       persist([job, ...jobs].slice(0, 20));
       setSelected(current => Array.from(new Set([job.id, ...current])));
-      await downloadPdf(pages, `Teamup_${start}_to_${end}.pdf`, printIdentity);
+      setPreviewDays(pages);
+      setPreviewIdentity(printIdentity);
+      setPreviewUrl(renderTeamupPreview(pages,printIdentity,currentPrintOptions));
+      await downloadPdf(pages, `Teamup_${start}_to_${end}.pdf`, printIdentity,currentPrintOptions);
       notify({
         tone: 'ok',
         text: `สร้าง PDF ${pages.length} หน้า และเก็บเข้า Queue แล้ว`,
@@ -2161,7 +2122,7 @@ function PdfView({
       await downloadPdf(
         pages,
         `Teamup_Merged_${pages[0].date}_to_${pages[pages.length - 1].date}.pdf`,
-        fallbackIdentity
+        fallbackIdentity,picked[0]?.printOptions||printOptions
       );
       notify({
         tone: 'ok',
@@ -2177,7 +2138,7 @@ function PdfView({
     await downloadPdf(
       job.pages,
       `Teamup_${job.start}_to_${job.end}.pdf`,
-      identity
+      identity,job.printOptions||DEFAULT_TEAMUP_PRINT
     );
   }
 
@@ -2251,22 +2212,23 @@ function PdfView({
           </small>
         </div>
         <div style={{marginTop:16,padding:12,border:'1px solid #dce3e8',borderRadius:10}}><label className="remember-row"><input type="checkbox" checked={showSidebar} onChange={e=>setShowSidebar(e.target.checked)}/><span>Show Calendars sidebar in PDF</span></label>{showSidebar && <div><small>These checkboxes only control the sidebar labels, never the day-grid events.</small><div style={{display:'flex',gap:8,margin:'10px 0'}}><button type="button" className="secondary" onClick={()=>setSidebarIds(calendars.map(c=>c.id))}>Select all</button><button type="button" className="secondary" onClick={()=>setSidebarIds([])}>Clear</button></div>{calendars.map(cal=><label className="remember-row" key={cal.id}><input type="checkbox" checked={sidebarIds.includes(cal.id)} onChange={e=>setSidebarIds(old=>e.target.checked?[...old,cal.id]:old.filter(id=>id!==cal.id))}/><span>{cal.name}</span></label>)}</div>}</div>
-        <div className="preset-row pdf-preset">
-          <span>Print preset</span>
-          <b>
-            <Check size={12} /> Day View
-          </b>
-          <b>
-            <Check size={12} /> Eco
-          </b>
-          <b>
-            <Check size={12} /> {showSidebar ? "Selected Sidebar" : "Hide Sidebar"}
-          </b>
-          <b>
-            <Check size={12} /> Portrait
-          </b>
-        </div>
-        <button
+        <div className="teamup-print-settings"><h3>Teamup-style Print Settings</h3>
+  <div className="print-setting-grid">
+    <label>View<select value={printOptions.view} onChange={e=>setPrintOptions(p=>({...p,view:e.target.value as TeamupPrintOptions['view']}))}><option value="day">Day</option><option value="week">Week</option><option value="month">Month</option></select></label>
+    <label>Color<select value={printOptions.colorMode} onChange={e=>setPrintOptions(p=>({...p,colorMode:e.target.value as TeamupPrintOptions['colorMode']}))}><option value="eco">Eco (white)</option><option value="full">Full color</option></select></label>
+    <label>Paper<select value={printOptions.paper} onChange={e=>setPrintOptions(p=>({...p,paper:e.target.value as TeamupPrintOptions['paper']}))}><option>A4</option><option>A3</option><option>Letter</option></select></label>
+    <label>Orientation<select value={printOptions.orientation} onChange={e=>setPrintOptions(p=>({...p,orientation:e.target.value as TeamupPrintOptions['orientation']}))}><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
+    <label>From hour<select value={printOptions.startHour} onChange={e=>setPrintOptions(p=>({...p,startHour:Number(e.target.value)}))}>{Array.from({length:24},(_,h)=><option key={h} value={h}>{h}:00</option>)}</select></label>
+    <label>To hour<select value={printOptions.endHour} onChange={e=>setPrintOptions(p=>({...p,endHour:Number(e.target.value)}))}>{Array.from({length:24},(_,h)=><option key={h} value={h+1}>{h+1}:00</option>)}</select></label>
+  </div>
+  <p className="print-hint">Hiding a calendar from the legend never removes its events from PDF.</p>
+</div>
+{previewIdentity && previewDays.length > 0 && <div className="teamup-preview-box">
+  <h3>PDF Preview</h3>
+  <button className="secondary" onClick={()=>setPreviewUrl(renderTeamupPreview(previewDays,previewIdentity,{...printOptions,showLegend:showSidebar,legendIds:sidebarIds}))}>Refresh preview</button>
+  {previewUrl && <img src={previewUrl} alt="Teamup PDF print preview"/>}
+</div>}
+                <button
           className="primary wide"
           disabled={loading}
           onClick={() => void generate()}
