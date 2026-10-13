@@ -92,3 +92,15 @@ Steps:
 3. Generate a schedule, edit an event category, review Day Preview and lunch lock
 4. Open Settings, check Local AI First status and that Configure and Guide controls remain available
 Expected: Private-style sidebar, topbar and panels render with generic identity; Demo cannot write real Teamup events; all five workspace tabs are navigable and official Public PDF footer remains available.
+
+## Test 11 - PDF Official layout proportions match Day View references
+Viewport: desktop
+Covers: Teamup Official print-style PDF, A4 day view, title and identity positions, ISO week label, printed date, calendar legend placement, 08:00-20:00 grid, quarter-hour lines, footer, Full Color stripes and Eco outlines
+Description: Compare generated PDF against the attached Teamup Official Eco and Full Color examples for 1 Oct 2026, without changing event data or translations.
+Setup:
+1. Choose Try Demo without Teamup and open PDF Export.
+Steps:
+1. Set 1 Oct 2026 as From and To, Day View, A4 Portrait, Show Calendars sidebar and Full Color.
+2. Generate PDF and inspect the first page. Compare title, date/ISO week row, calendar legend, timeline starting at approximately 14% of the page height, 08:00-20:00 time ruler, event blocks, and footer near 94% of the page height.
+3. Switch to Eco and regenerate. Then disable sidebar and verify events remain printed.
+Expected: Official-style header, W40 and right-hand date display; calendar legend occupies the left region; timeline aligns with event blocks; Full Color displays diagonal multi-calendar stripes while Eco has white blocks and colored outlines; hiding the legend never filters events.
