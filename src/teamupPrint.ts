@@ -156,37 +156,35 @@ function drawWrapped(ctx: CanvasRenderingContext2D, text: string, x: number, y: 
   return lines.length > maxLines;
 }
 function drawStripedBlock(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, colors: string[], mode: PrintColorMode) {
+  const primary = colors[0] || '#2c87ad';
   roundedRect(ctx, x, y, w, h, 3);
   ctx.save();
   ctx.clip();
-  const primary = colors[0] || '#2c87ad';
   ctx.fillStyle = mode === 'eco' ? '#ffffff' : primary;
   ctx.fillRect(x, y, w, h);
   if (mode === 'full' && colors.length > 1) {
-    const stripeWidth = 18;
-    const steps = Math.ceil((w + h) / stripeWidth) + 3;
-    for (let i = -Math.ceil(h / stripeWidth) - 1; i <= steps; i++) {
-      ctx.fillStyle = colors[(i % colors.length + colors.length) % colors.length];
+    const stripe = Math.max(12, Math.min(25, w / 14));
+    const slope = h * 0.95;
+    for (let i = -Math.ceil(slope / stripe) - 2; i <= Math.ceil((w + slope) / stripe) + 3; i++) {
+      const sx = x + i * stripe;
+      ctx.fillStyle = colors[((i % colors.length) + colors.length) % colors.length];
       ctx.beginPath();
-      const sx = x + i * stripeWidth;
       ctx.moveTo(sx, y + h);
-      ctx.lineTo(sx + stripeWidth, y + h);
-      ctx.lineTo(sx + stripeWidth + h * 0.68, y);
-      ctx.lineTo(sx + h * 0.68, y);
+      ctx.lineTo(sx + stripe, y + h);
+      ctx.lineTo(sx + stripe + slope, y);
+      ctx.lineTo(sx + slope, y);
       ctx.closePath();
       ctx.fill();
     }
   }
-  if (mode === 'eco' && colors.length > 1) {
-    colors.forEach((color, i) => {
-      ctx.fillStyle = color;
-      ctx.fillRect(x + (i * w) / colors.length, y, w / colors.length, 3);
-    });
+  if (mode === 'eco') {
+    ctx.fillStyle = primary;
+    ctx.fillRect(x, y, Math.max(3.4, w * 0.01), h);
   }
   ctx.restore();
   roundedRect(ctx, x, y, w, h, 3);
   ctx.strokeStyle = primary;
-  ctx.lineWidth = mode === 'eco' ? 1.8 : 0.5;
+  ctx.lineWidth = mode === 'eco' ? 0.85 : 0.5;
   ctx.stroke();
 }
 function eventPlacements(events: PrintEvent[]) {
@@ -221,83 +219,195 @@ function canvasPage(width: number, height: number) {
   ctx.fillRect(0, 0, width, height);
   return { canvas, ctx };
 }
-function basePage(ctx: CanvasRenderingContext2D, width: number, height: number, identity: PrintIdentity, label: string, pageNo?: string) {
-  drawLabel(ctx, identity.calendarTitle || 'Teamup Calendar', 24, 35, width * 0.6, 'bold 18px Arial', '#263443');
-  drawLabel(ctx, identity.accountLabel || '', width - 24, 35, width * 0.33, '12px Arial', '#293b4a', 'right');
-  ctx.strokeStyle = '#dce3e7';
-  ctx.lineWidth = 0.8;
-  ctx.beginPath(); ctx.moveTo(24, 51); ctx.lineTo(width - 24, 51); ctx.stroke();
-  drawLabel(ctx, label, 30, 76, width - 60, 'bold 14px Arial', '#273c4e');
-  ctx.beginPath(); ctx.moveTo(24, height - 35); ctx.lineTo(width - 24, height - 35); ctx.stroke();
-  const zone = identity.timeZone.split('/').pop()?.replace(/_/g, ' ') || '';
-  drawLabel(ctx, zone, width - 160, height - 18, 100, '9px Arial', '#237caa');
-  drawLabel(ctx, 'Powered by teamup', width - 24, height - 18, 132, '10px Arial', '#6c7881', 'right');
-  if (pageNo) drawLabel(ctx, pageNo, 24, height - 18, 60, '9px Arial', '#6c7881');
+export function officialDayGeometry(width: number, height: number, showLegend: boolean) {
+  const left = width * (showLegend ? 0.341 : 0.080);
+  return {
+    legendX: width * 0.034,
+    legendWidth: width * 0.226,
+    headingX: width * (showLegend ? 0.298 : 0.032),
+    left,
+    right: width * 0.952,
+    lineStart: left - width * 0.062,
+    top: height * 0.141,
+    bottom: height * 0.855,
+    footerLine: height * 0.938,
+  };
 }
-function drawLegend(ctx: CanvasRenderingContext2D, calendars: PrintCalendar[], options: TeamupPrintOptions, x: number, y: number, width: number, maxHeight: number) {
+function isoWeekNumber(iso: string): number {
+  const date = dateUtc(iso);
+  date.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 6) % 7) + 3);
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - ((firstThursday.getUTCDay() + 6) % 7) + 3);
+  return 1 + Math.round((date.getTime() - firstThursday.getTime()) / 604800000);
+}
+function basePage(
+  ctx: CanvasRenderingContext2D, width: number, height: number,
+  identity: PrintIdentity, label: string, pageNo?: string, footerStart?: number
+) {
+  const scale = Math.min(width / 595.28, height / 841.89);
+  const margin = Math.max(8 * scale, width * 0.014);
+  drawLabel(ctx, identity.calendarTitle || 'Teamup Calendar', margin, height * 0.042,
+    width * 0.65, 'bold ' + (18 * scale) + 'px Arial', '#253746');
+  drawLabel(ctx, identity.accountLabel || '', width - 36 * scale, height * 0.041,
+    width * 0.31, (11 * scale) + 'px Arial', '#263b4d', 'right');
+  ctx.strokeStyle = '#d6dfe5';
+  ctx.lineWidth = Math.max(0.5, 0.8 * scale);
+  ctx.beginPath();
+  ctx.moveTo(margin, height * 0.061);
+  ctx.lineTo(width - margin, height * 0.061);
+  ctx.stroke();
+  if (label) {
+    drawLabel(ctx, label, 30 * scale, 76 * height / 841.89, width * 0.85,
+      'bold ' + (14 * scale) + 'px Arial', '#273c4e');
+  }
+  ctx.strokeStyle = '#d8dddf';
+  ctx.beginPath();
+  ctx.moveTo(footerStart ?? margin, height * 0.938);
+  ctx.lineTo(width - margin, height * 0.938);
+  ctx.stroke();
+  const baseline = height * 0.957;
+  const zone = identity.timeZone.split('/').pop()?.replace(/_/g, ' ') || '';
+  drawLabel(ctx, zone, width - 164 * scale, baseline, 75 * scale,
+    (9 * scale) + 'px Arial', '#167eb4');
+  drawLabel(ctx, 'Powered by', width - 96 * scale, baseline, 70 * scale,
+    (9 * scale) + 'px Arial', '#7c878f');
+  const markX = width - 43 * scale;
+  const markY = baseline - 7 * scale;
+  ctx.fillStyle = '#32475b';
+  for (let row = 0; row < 3; row++) {
+    for (let col = 0; col < 3; col++) {
+      ctx.fillRect(markX + col * 3.2 * scale, markY + row * 3.2 * scale, 1.9 * scale, 1.9 * scale);
+    }
+  }
+  drawLabel(ctx, 'teamup', width - margin, baseline, 43 * scale,
+    'bold ' + (9 * scale) + 'px Arial', '#32475b', 'right');
+  if (pageNo) drawLabel(ctx, pageNo, margin, baseline, 110 * scale,
+    (9 * scale) + 'px Arial', '#6c7881');
+}
+function ellipsize(ctx: CanvasRenderingContext2D, text: string, width: number): string {
+  if (ctx.measureText(text).width <= width) return text;
+  let clipped = text;
+  while (clipped.length > 1 && ctx.measureText(clipped + '…').width > width) clipped = clipped.slice(0, -1);
+  return clipped + '…';
+}
+function drawLegend(
+  ctx: CanvasRenderingContext2D, calendars: PrintCalendar[], options: TeamupPrintOptions,
+  x: number, y: number, width: number, maxHeight: number, scale = 1
+) {
   const entries = visibleLegend(calendars, options);
   if (!entries.length) return;
-  drawLabel(ctx, 'Calendars', x + 7, y, width - 12, 'bold 12px Arial', '#263443');
-  const rowHeight = Math.min(20, Math.max(12, (maxHeight - 35) / entries.length));
-  entries.forEach((calendar, i) => {
-    const rowTop = y + 14 + i * rowHeight;
+  drawLabel(ctx, 'Calendars', x + width / 2, y, width - 10 * scale,
+    'bold ' + (12 * scale) + 'px Arial', '#253746', 'center');
+  const rowHeight = 13.6 * scale;
+  const gap = 0.7 * scale;
+  const maxItems = Math.max(0, Math.floor((maxHeight - 13 * scale) / (rowHeight + gap)));
+  entries.slice(0, maxItems).forEach((calendar, index) => {
+    const top = y + 13 * scale + index * (rowHeight + gap);
     const color = calendarColor(calendar, calendars.findIndex(item => item.id === calendar.id));
-    ctx.fillStyle = color;
-    roundedRect(ctx, x + 6, rowTop, Math.max(10, width - 12), rowHeight - 2, 3);
+    const radius = options.colorMode === 'eco' ? 1 : 3 * scale;
+    roundedRect(ctx, x, top, width, rowHeight, radius);
+    ctx.fillStyle = options.colorMode === 'eco' ? '#ffffff' : color;
     ctx.fill();
-    drawLabel(ctx, calendar.name, x + 12, rowTop + rowHeight - 7, width - 25, '10px Arial', luminance(color) > 0.43 ? '#263443' : '#ffffff');
+    if (options.colorMode === 'eco') {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 0.65 * scale;
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.fillRect(x, top, 3.4 * scale, rowHeight);
+    }
+    const font = (10.1 * scale) + 'px Arial';
+    ctx.font = font;
+    drawLabel(ctx, ellipsize(ctx, calendar.name, width - 12 * scale),
+      x + 6 * scale, top + 10.1 * scale, width - 12 * scale,
+      font, options.colorMode === 'eco' ? '#253746' : '#ffffff');
   });
 }
 function renderDay(day: PrintDay, identity: PrintIdentity, options: TeamupPrintOptions, calendars: PrintCalendar[]) {
   const [width, height] = printPaperPoints(options);
   const { canvas, ctx } = canvasPage(width, height);
-  basePage(ctx, width, height, day.printIdentity || identity, formatDate(day.date));
   const legend = visibleLegend(calendars, options);
-  const legendWidth = legend.length ? Math.min(155, width * 0.28) : 0;
-  const left = 65 + legendWidth;
-  const right = width - 24;
-  const top = 116;
-  const bottom = height - 65;
-  if (legend.length) drawLegend(ctx, calendars, options, 24, 112, legendWidth + 22, bottom - top);
+  const scale = Math.min(width / 595.28, height / 841.89);
+  const g = officialDayGeometry(width, height, legend.length > 0);
+  const { left, right, top, bottom, lineStart, headingX } = g;
+  basePage(ctx, width, height, day.printIdentity || identity, '', undefined, legend.length ? lineStart : undefined);
+
+  drawLabel(ctx, formatDate(day.date).replace(',', ''), headingX, height * 0.086,
+    right - headingX, 'bold ' + (13 * scale) + 'px Arial', '#273746');
+  drawLabel(ctx, 'W' + isoWeekNumber(day.date), headingX, height * 0.118,
+    52 * scale, (10 * scale) + 'px Arial', '#263d50');
+  const rightDate = new Intl.DateTimeFormat('en-GB', {
+    day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC'
+  }).format(dateUtc(day.date));
+  drawLabel(ctx, rightDate, right - 2 * scale, height * 0.118,
+    120 * scale, (11 * scale) + 'px Arial', '#263b4e', 'right');
+
+  if (legend.length) {
+    drawLegend(ctx, calendars, options, g.legendX, height * 0.086,
+      g.legendWidth, bottom - height * 0.086, scale);
+  }
+
   const timed = day.events.filter(event => !event.allDay);
   const starts = timed.map(event => event.start);
   const ends = timed.map(event => event.end);
-  const from = Math.max(0, Math.min(options.startHour, starts.length ? Math.floor(Math.min(...starts) / 60) : options.startHour));
-  const to = Math.min(24, Math.max(options.endHour, ends.length ? Math.ceil(Math.max(...ends) / 60) : options.endHour, from + 1));
+  const from = Math.max(0, Math.min(options.startHour,
+    starts.length ? Math.floor(Math.min(...starts) / 60) : options.startHour));
+  const to = Math.min(24, Math.max(options.endHour,
+    ends.length ? Math.ceil(Math.max(...ends) / 60) : options.endHour, from + 1));
   const minuteHeight = (bottom - top) / ((to - from) * 60);
+
   const allDay = day.events.filter(event => event.allDay);
   if (allDay.length) {
-    drawLabel(ctx, 'All day: ' + allDay.map(item => item.title).join(' • '), left + 5, 105, right - left - 5, 'bold 10px Arial', '#30465a');
+    drawLabel(ctx, 'All day: ' + allDay.map(event => event.title).join(' • '),
+      left + 4 * scale, top - 4 * scale, right - left - 8 * scale,
+      'bold ' + (9 * scale) + 'px Arial', '#30465a');
   }
-  for (let hour = from; hour <= to; hour++) {
-    const y = top + (hour - from) * 60 * minuteHeight;
-    ctx.lineWidth = 0.7;
-    ctx.strokeStyle = '#dce2e5';
-    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
-    if (hour < to) drawLabel(ctx, formatClock(hour * 60), left - 8, y + 3.5, 48, '10px Arial', '#5b6b79', 'right');
+
+  // Official Teamup time ruler uses hourly markers and dotted quarter-hour lines.
+  for (let minute = from * 60; minute <= to * 60; minute += 15) {
+    const y = top + (minute - from * 60) * minuteHeight;
+    const major = minute % 60 === 0;
+    ctx.lineWidth = (major ? 0.75 : 0.48) * scale;
+    ctx.strokeStyle = major ? '#cdd4d8' : '#dce2e6';
+    ctx.setLineDash(major ? [] : [1.1 * scale, 1.45 * scale]);
+    ctx.beginPath();
+    ctx.moveTo(lineStart, y);
+    ctx.lineTo(right, y);
+    ctx.stroke();
+    if (major && minute < to * 60) {
+      drawLabel(ctx, formatClock(minute), left - 3 * scale,
+        y + 9.3 * scale, 46 * scale, (9.8 * scale) + 'px Arial',
+        '#293c4c', 'right');
+    }
   }
+  ctx.setLineDash([]);
+
   let truncated = false;
   eventPlacements(timed).forEach(({ event, column, columns }) => {
     const start = Math.max(event.start, from * 60);
     const end = Math.min(event.end, to * 60);
     if (end <= start) return;
     const y = top + (start - from * 60) * minuteHeight;
-    const h = Math.max(7, (end - start) * minuteHeight - 1);
-    const gap = 1.5;
+    const h = Math.max(7 * scale, (end - start) * minuteHeight - 0.75 * scale);
+    const gap = 1.0 * scale;
     const w = (right - left) / columns;
     const x = left + column * w + gap;
-    const rectW = Math.max(10, w - gap * 2);
-    const colors = eventColors(event, calendars);
-    drawStripedBlock(ctx, x, y, rectW, h, colors, options.colorMode);
-    const dark = options.colorMode === 'eco' || (colors.length === 1 && luminance(colors[0]) > 0.43);
-    ctx.fillStyle = dark ? '#243646' : '#ffffff';
-    ctx.font = '9.2px Arial';
-    const availableHeight = Math.max(0, h - 8);
-    const maxLines = Math.floor(availableHeight / 11);
-    if (!maxLines) { truncated = true; return; }
+    const blockWidth = Math.max(10 * scale, w - gap * 2);
+    drawStripedBlock(ctx, x, y, blockWidth, h, eventColors(event, calendars), options.colorMode);
+    ctx.fillStyle = options.colorMode === 'eco' ? '#263746' : '#ffffff';
+    ctx.font = (9.4 * scale) + 'px Arial';
+    const maxLines = Math.floor(Math.max(0, h - 7 * scale) / (11 * scale));
+    if (!maxLines) {
+      truncated = true;
+      return;
+    }
     ctx.save();
-    ctx.beginPath(); ctx.rect(x + 4, y + 2, rectW - 8, h - 3); ctx.clip();
-    truncated = drawWrapped(ctx, formatClock(event.start) + ' ' + event.title, x + 5, y + 11, rectW - 10, 11, maxLines) || truncated;
+    ctx.beginPath();
+    ctx.rect(x + 4 * scale, y + 2 * scale, Math.max(2, blockWidth - 8 * scale),
+      Math.max(1, h - 3 * scale));
+    ctx.clip();
+    truncated = drawWrapped(ctx, formatClock(event.start) + ' ' + event.title,
+      x + 5.5 * scale, y + 10.5 * scale, blockWidth - 11 * scale,
+      11 * scale, maxLines) || truncated;
     ctx.restore();
   });
   return { canvas, truncated };
