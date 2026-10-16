@@ -355,8 +355,10 @@ function renderDay(day: PrintDay, identity: PrintIdentity, options: TeamupPrintO
     ends.length ? Math.ceil(Math.max(...ends) / 60) : options.endHour, from + 1));
   const minuteHeight = (bottom - top) / ((to - from) * 60);
 
+  let truncated = false;
   const allDay = day.events.filter(event => event.allDay);
   if (allDay.length) {
+    truncated = true;
     drawLabel(ctx, 'All day: ' + allDay.map(event => event.title).join(' • '),
       left + 4 * scale, top - 4 * scale, right - left - 8 * scale,
       'bold ' + (9 * scale) + 'px Arial', '#30465a');
@@ -381,7 +383,6 @@ function renderDay(day: PrintDay, identity: PrintIdentity, options: TeamupPrintO
   }
   ctx.setLineDash([]);
 
-  let truncated = false;
   eventPlacements(timed).forEach(({ event, column, columns }) => {
     const start = Math.max(event.start, from * 60);
     const end = Math.min(event.end, to * 60);
@@ -495,6 +496,7 @@ function renderDetailPages(group: RenderGroup, identity: PrintIdentity, options:
       lines.forEach((line, i) => ctx.fillText(line, 44, y + 12 + i * 14, width - 85));
       y += rowHeight;
     }
+    if (y === 100 && cursor < rows.length) throw new Error('Event title cannot fit in PDF details page');
     result.push(canvas);
   }
   return result;
