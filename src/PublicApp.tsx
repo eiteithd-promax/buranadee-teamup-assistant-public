@@ -758,7 +758,11 @@ async function requestAiLocalFirst<T extends object>(route: string, payload: Rec
   try {
     for (let attempt = 0; attempt < 72; attempt += 1) {
       await new Promise(resolve => window.setTimeout(resolve, 1700));
-      const poll = await api.post('/api/ai/job-status', { jobId: initial.jobId, token: initial.token });
+      const poll = await api.post('/api/ai/job-status', {
+        jobId: initial.jobId,
+        token: initial.token,
+        ...(route === '/api/translate-work-lines' ? { lines: payload.lines } : {}),
+      });
       const status = poll.data as { status?: string; result?: T };
       if (status.status === 'completed' && status.result) return status.result;
       if (status.status === 'failed') throw new Error('Local AI could not complete the request.');
@@ -1926,7 +1930,7 @@ function PdfView({
   const [command, setCommand] = useState('');
   const [fromDate, setFromDate] = useState(today);
   const [toDate, setToDate] = useState(today);
-  const [skipEmpty, setSkipEmpty] = useState(true);
+  const [skipEmpty, setSkipEmpty] = useState(false);
   const [showSidebar,setShowSidebar]=useState(false);
   const [printOptions,setPrintOptions]=useState<TeamupPrintOptions>({...DEFAULT_TEAMUP_PRINT});
   const [previewUrl,setPreviewUrl]=useState('');
@@ -1992,23 +1996,24 @@ function PdfView({
           categories: ['Job Routine'],
         },
       ];
-    const responses = await Promise.all(
-      monthKeysBetween(start, end).map(month =>
-        api.post('/api/teamup/month-events', {
-          connection: {
-            apiKey: connection.apiKey,
-            calendarKey: connection.calendarKey,
-          },
-          mapping: connection.mapping,
-          month,
-        })
-      )
-    );
-    return responses
-      .flatMap(
-        response => (response.data as { events?: TeamupEvent[] }).events || []
-      )
-      .filter(event => event.date >= start && event.date <= end);
+    const all: TeamupEvent[] = [];
+    for (const month of monthKeysBetween(start, end)) {
+      const response = await api.post('/api/teamup/month-events', {
+        connection: { apiKey: connection.apiKey, calendarKey: connection.calendarKey },
+        mapping: connection.mapping, month,
+      });
+      const data = response.data as { events?: TeamupEvent[]; exportSegmentCount?: number };
+      if (!Array.isArray(data.events) || data.exportSegmentCount !== data.events.length) {
+        throw new Error('Teamup returned incomplete month: ' + month);
+      }
+      all.push(...data.events);
+    }
+    const unique = new Map<string, TeamupEvent>();
+    all.filter(event => event.date >= start && event.date <= end).forEach(event => {
+      const key = JSON.stringify([event.id,event.date,event.start,event.end,event.title,event.subcalendarIds]);
+      unique.set(key, event);
+    });
+    return [...unique.values()].sort((a,b) => a.date.localeCompare(b.date) || a.start - b.start);
   }
 
   async function generate() {
@@ -2039,6 +2044,7 @@ function PdfView({
       events.forEach(event =>
         grouped.set(event.date, [...(grouped.get(event.date) || []), event])
       );
+      const expectedEventCount = events.length;
       const pages: PdfDay[] = skipEmpty
         ? Array.from(grouped.entries())
             .sort(([a], [b]) => a.localeCompare(b))
@@ -2060,6 +2066,7 @@ function PdfView({
             }
             return result;
           })();
+      if (pages.reduce((sum, page) => sum + page.events.length, 0) !== expectedEventCount) throw new Error('PDF grouping lost events');
       if (!pages.length) {
         notify({ tone: 'warn', text: 'ช่วงนี้ไม่มี Event ให้สร้าง PDF' });
         return;
@@ -2085,7 +2092,7 @@ function PdfView({
       await downloadPdf(pages, `Teamup_${start}_to_${end}.pdf`, printIdentity,currentPrintOptions);
       notify({
         tone: 'ok',
-        text: `สร้าง PDF ${pages.length} หน้า และเก็บเข้า Queue แล้ว`,
+        text: `สร้าง PDF จาก ${expectedEventCount} รายการใน ${pages.length} วัน และเก็บเข้า Queue แล้ว`,
       });
     } catch {
       notify({
@@ -2107,18 +2114,26 @@ function PdfView({
     try {
       const fallbackIdentity = await resolvePrintIdentity(connection);
       const map = new Map<string, PdfDay>();
-      picked.forEach(job =>
-        job.pages.forEach(page =>
-          map.set(page.date, {
-            ...page,
-            printIdentity: job.printIdentity || fallbackIdentity,
-            sidebar: page.sidebar || job.sidebar,
-          })
-        )
-      );
+      picked.forEach(job => job.pages.forEach(page => {
+        const existing = map.get(page.date);
+        const combined = [...(existing?.events || []), ...page.events];
+        const seen = new Set<string>();
+        const events = combined.filter(event => {
+          const key = JSON.stringify([event.id, event.date, event.start, event.end, event.title, event.subcalendarIds]);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        map.set(page.date, {
+          ...page, events,
+          printIdentity: page.printIdentity || job.printIdentity || fallbackIdentity,
+          sidebar: page.sidebar || job.sidebar,
+        });
+      }));
       const pages = Array.from(map.values()).sort((a, b) =>
         a.date.localeCompare(b.date)
       );
+      if (!pages.length) throw new Error('No pages to merge');
       await downloadPdf(
         pages,
         `Teamup_Merged_${pages[0].date}_to_${pages[pages.length - 1].date}.pdf`,
