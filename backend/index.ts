@@ -1,4 +1,5 @@
 import { ai, error, json, router, secrets } from '@appdeploy/sdk';
+import { normalizeTeamupMonthEvents } from './teamupEventNormalization';
 
 type CategoryName =
   | 'Outside'
@@ -141,8 +142,10 @@ function monthBounds(month: string) {
 }
 
 function eventCategories(value: unknown, mapping: Mapping) {
-  const ids = Array.isArray(value) ? value : value == null ? [] : [value];
-  return CATEGORIES.filter(category => ids.some(item => Number(item) === mapping[category]));
+  if (!Array.isArray(value)) return [] as CategoryName[];
+  return CATEGORIES.filter(category =>
+    value.some(item => Number(item) === mapping[category])
+  );
 }
 
 function validateEvents(value: unknown) {
@@ -276,41 +279,56 @@ function normalizeOcr(data: unknown) {
 const TEAMUP_LOCAL_BRIDGE = 'https://idjzkestgnbkybvlzwij.supabase.co/functions/v1/teamup-bridge';
 const LOCAL_AI_SITE_KEY = 'TEAMUP_LOCAL_SITE_KEY';
 const TRANSLATION_SYSTEM = [
-  'Translate entire Thai architecture and construction work notes into natural precise English calendar event titles.',
-  'Preserve all actions, names, sites, technical work, people, rooms, floors and project context; never summarize as Work Construction.',
-  'Use relevant hints of terms and approved example translations in the supplied prompt.',
-  'Translate คุณ as Khun. Thai names are transliterated; วัดไทร is Wat Sai.',
-  'Example: ไปหน้างาน งานวัดไทร ประกอบงานโครงสร้าง -> Site Visit – Wat Sai Project – Structural Assembly Work.',
-  'Return JSON with a titles array, one complete English title per source line, in source order.'
+  'You are an expert Thai-English coordinator writing natural, complete English titles for a professional Teamup work calendar.',
+  'Translate each entire work description faithfully; never replace it with a category or vague summary such as Work Construction or On-site Work.',
+  'Preserve the specific action (visit, inspect, assemble, install, design, revise, meet), the site or project name, trade or work scope, building and room, people, and any floor or technical details present.',
+  'Transliterate Thai proper names naturally; วัดไทร is Wat Sai. Preserve English names, codes, quantities, and existing specialist terms. Render คุณ before a name as Khun.',
+  'Use fluent concise professional English, usually 6-18 words when the original includes details; no invented details or filler.',
+  'Example Thai: ไปหน้างาน งานวัดไทร ประกอบงานโครงสร้าง. Correct: Site Visit – Wat Sai Project – Structural Assembly Work. Wrong: Work Constrction.',
+  'Example Thai: ไปตรวจงานโครงสร้างบ้านคุณ Steven. Correct: Inspect Structural Work at Khun Steven’s House.',
+  'Example Thai: ทำแบบห้องซักรีดบ้านคุณ Steven. Correct: Prepare Laundry Room Drawings for Khun Steven’s House.',
+  'Return exactly one English title for each input line, in the same order, as a JSON object with a titles array.'
 ].join(' ');
-function translationComplete(source: string, title: unknown) {
-  if (typeof title !== 'string' || !title.trim() || /[ก-๙]/.test(title)) return false;
-  if (source.length > 26 && (title.match(/[A-Za-z]+/g) || []).length < 5) return false;
-  if (/^(work|work construction|work constrction|site work|on-site work|job routine)$/i.test(title.trim())) return false;
-  const rules: Array<[RegExp, RegExp]> = [
-    [/หน้างาน/,/site|field|jobsite/i],
-    [/โครงสร้าง/,/structur|framing/i],
-    [/ติดตั้ง|ประกอบ/,/install|assembl|erect|fabricat/i],
-    [/ตรวจงาน/,/inspect|check|review/i],
-    [/ประชุม/,/meet|discuss|coordinat/i],
-    [/เขียนแบบ|ทำแบบ|แก้แบบ/,/draw|design|draft|revis|plan/i],
-    [/ระบบแอร์/,/air.condition|hvac/i],
-    [/ห้องซักรีด/,/laundry/i],
-    [/งานวัดไทร/,/wat sai/i]
-  ];
-  const names = source.match(/\\b[A-Z][A-Za-z0-9-]{2,}\\b/g) || [];
-  if (names.some(name => !title.toLowerCase().includes(name.toLowerCase()))) return false;
-  return rules.every(([thai,english]) => !thai.test(source) || english.test(title));
-}
-function translationsComplete(lines: string[], titles: unknown) {
-  return Array.isArray(titles) && titles.length === lines.length &&
-    titles.every((item,index)=>translationComplete(lines[index],item));
-}
 const ATTENDANCE_SYSTEM =
   'Read Thai employee attendance images accurately. Never invent missing times. Respect the exact source column.';
 const ATTENDANCE_PROMPT =
   'Extract every visible dated row in a JSON object with monthLabel and records array. Dates as DD Mon YYYY or YYYY-MM-DD. Use ONLY the scanner-machine time column เวลาจากเครื่องสแกน to identify check-in/check-out. NEVER use HR calculated time column เวลาผ่านการคำนวณHR. Preserve visible overtime and outside-work remarks; overtime is not Leave. If missing return an empty string. Each record must contain date,checkIn,checkOut,note.';
 type QueuedAiJob = { jobId: string; token: string };
+
+const TRANSLATION_MEANING_ANCHORS: Array<[RegExp, RegExp]> = [
+  [/หน้างาน|ไซต์งาน|ไปไซต์/, /\b(site|on[- ]?site|jobsite|field)\b/i],
+  [/โครงสร้าง/, /structur|framing|frame erection/i],
+  [/ประกอบ|ติดตั้ง/, /assembl|install|erect|fabricat|mount/i],
+  [/ตรวจงาน|ตรวจสอบงาน/, /inspect|check|review|monitor|survey/i],
+  [/ประชุม|หารือ|คุยงาน/, /meet|discuss|coordinat/i],
+  [/เขียนแบบ|ทำแบบ|แก้แบบ/, /draw|draft|design|plan|model|revis/i],
+  [/ห้องซักรีด/, /laundry/i],
+  [/ระบบแอร์|เครื่องปรับอากาศ/, /air.?condition|hvac/i],
+];
+
+function translationLooksComplete(source: string, title: string): boolean {
+  const translated = title.trim();
+  const words = translated.match(/[A-Za-z][A-Za-z'-]*/g) || [];
+  if (!translated || /[ก-๙]/.test(translated)) return false;
+  if (source.trim().length >= 30 && words.length < 5) return false;
+  if (source.trim().length >= 19 && words.length < 3) return false;
+  if (source.trim().length >= 16 &&
+      /^(?:work(?: (?:construction|constrction|task|site))?|construction work|site work|job routine)$/i.test(translated)) return false;
+  if (/(?:งาน|โครงการ)\s*วัด[ก-๙]{2,}/.test(source) && !/\b(wat|temple)\b/i.test(translated)) return false;
+  if (/คุณ\s*[A-Za-z]/.test(source) && !/\bkhun\b/i.test(translated)) return false;
+  const originalNames = source.match(/\b[A-Z][A-Za-z0-9-]{2,}\b/g) || [];
+  if (originalNames.some(name => !translated.toLowerCase().includes(name.toLowerCase()))) return false;
+  return TRANSLATION_MEANING_ANCHORS.every(([thai, english]) =>
+    !thai.test(source) || english.test(translated)
+  );
+}
+
+function validTranslationBatch(lines: string[], titles: unknown): titles is string[] {
+  return Array.isArray(titles) &&
+    titles.length === lines.length &&
+    titles.every((title, index) => typeof title === 'string' &&
+      translationLooksComplete(lines[index], title));
+}
 
 async function callLocalBridge(op: string, payload: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
   const names = await secrets.listSecretNames();
@@ -386,10 +404,15 @@ export const handler = router({
           return json({ status: 'completed', result: { records } });
         }
         if (Array.isArray(result.titles)) {
-          const lines = Array.isArray(payload.lines) ? payload.lines.filter((item):item is string=>typeof item==='string') : [];
-          if (!result.titles.length || (lines.length > 0 && !translationsComplete(lines,result.titles)))
-            return json({status:'failed',message:'Incomplete local translation'});
-          return json({status:'completed',result:{titles:result.titles}});
+          const titles = result.titles;
+          const lines = Array.isArray(payload.lines)
+            ? payload.lines.filter((item): item is string => typeof item === 'string')
+            : [];
+          if (!titles.length || !titles.every(title => typeof title === 'string' && title.trim()) ||
+              (lines.length > 0 && !validTranslationBatch(lines, titles))) {
+            return json({ status: 'failed', message: 'Local translation omitted details; retry using cloud translation.' });
+          }
+          return json({ status: 'completed', result: { titles } });
         }
         return json({ status: 'failed', message: 'Local AI output invalid.' });
       }
@@ -425,6 +448,7 @@ export const handler = router({
           subcalendars?: Array<{
             id?: unknown;
             name?: unknown;
+            color?: unknown;
             active?: unknown;
             readonly?: unknown;
           }>;
@@ -474,9 +498,12 @@ export const handler = router({
           .map(item => ({
             id: Number(item.id),
             name: typeof item.name === 'string' ? item.name.trim() : '',
+            color: typeof item.color === 'string' && /^#[0-9a-f]{6}$/i.test(item.color) ? item.color : undefined,
             readonly: item.readonly === true,
           }))
-          .filter(item => Number.isFinite(item.id) && item.name);
+          .filter(
+            item => Number.isFinite(item.id) && item.name && !item.readonly
+          );
         return json({
           calendarName,
           viewerName,
@@ -514,52 +541,12 @@ export const handler = router({
           connection,
           `/events?startDate=${encodeURIComponent(bounds.start)}&endDate=${encodeURIComponent(bounds.end)}&tz=${encodeURIComponent(TIMEZONE)}`
         );
-        const events: Array<{
-          id: string;
-          date: string;
-          start: number;
-          end: number;
-          title: string;
-          categories: CategoryName[];
-          allDay: boolean;
-          subcalendarIds: number[];
-        }> = [];
-        (response.events || []).forEach((raw, index) => {
-          const subcalendarIds = (Array.isArray(raw.subcalendar_ids) ? raw.subcalendar_ids : raw.subcalendar_id == null ? [] : [raw.subcalendar_id]).map(Number).filter(Number.isFinite);
-          const categories = eventCategories(subcalendarIds, mapping);
-          const startValue = parseTeamupTime(raw.start_dt);
-          if (!startValue) return;
-          const endValue = parseTeamupTime(raw.end_dt);
-          if (endValue && endValue.date < bounds.start) return;
-          if (startValue.date > bounds.end) return;
-          const allDay =
-            raw.all_day === true || raw.all_day === 1 || raw.all_day === '1';
-          const date = startValue.date < bounds.start ? bounds.start : startValue.date;
-          const start = allDay || date !== startValue.date ? 0 : startValue.minutes;
-          let end = allDay
-            ? 1440
-            : endValue?.date === date
-              ? endValue.minutes
-              : 1440;
-          if (end <= start) end = Math.min(1440, start + 1);
-          events.push({
-            id: String(raw.id ?? `event-${index}`),
-            date,
-            start,
-            end,
-            title:
-              typeof raw.title === 'string' && raw.title.trim()
-                ? raw.title.trim()
-                : 'Untitled event',
-            categories,
-            allDay,
-            subcalendarIds,
-          });
-        });
-        events.sort(
-          (a, b) => a.date.localeCompare(b.date) || a.start - b.start
-        );
-        return json({ month, events });
+        if (!Array.isArray(response.events)) {
+          return error('Teamup response has no events array. Export blocked to prevent data loss.', 502);
+        }
+        const normalized = normalizeTeamupMonthEvents(response.events, month, mapping, TIMEZONE);
+        const events = normalized.events;
+        return json({ month, events, sourceEventCount: normalized.sourceEventCount, exportSegmentCount: normalized.exportSegmentCount });
       } catch (caught) {
         const diagnosis = describeTeamupError(caught);
         return error(diagnosis.message, diagnosis.status);
@@ -642,30 +629,54 @@ export const handler = router({
       );
       if (lines.some(line => !line || line.length > 500))
         return error('Each work line must be 1-500 characters.', 400);
+      const hints = Array.isArray(payload.hints) ? payload.hints.slice(0, lines.length) : [];
       if (payload.forceAppDeploy !== true) {
         const local = await submitLocalFirst('translate_work_lines', {
           system: TRANSLATION_SYSTEM,
-          prompt: JSON.stringify({ lines, hints: payload.hints }),
+          prompt: JSON.stringify({ lines, hints }),
         });
         if (local) return json({ pending: true, ...local, provider: 'LOCAL' }, 202);
       }
       try {
-        let rejected: unknown = null;
-        for (let attempt = 0; attempt < 2; attempt++) {
+        let incomplete: unknown = null;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
           const result = await ai.generate({
             system: TRANSLATION_SYSTEM,
-            prompt: JSON.stringify({lines,hints:payload.hints,rejected}),
-            schema: {type:'object',properties:{titles:{type:'array',items:{type:'string'}}},required:['titles']},
-            thinkingMode: 'FAST', temperature: 0.15, maxTokens: 3000,
+            prompt: JSON.stringify({
+              lines,
+              hints,
+              ...(incomplete ? {
+                rejectedTitles: incomplete,
+                instruction: 'Your previous titles omitted required facts. Rewrite every title and preserve every project, location, action, and technical scope.'
+              } : {}),
+            }),
+            schema: {
+              type: 'object',
+              properties: {
+                titles: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['titles'],
+            },
+            thinkingMode: 'FAST',
+            temperature: 0.15,
+            maxTokens: 3000,
           });
-          let titles:unknown = [];
-          try { const raw=result.text.trim();titles=(JSON.parse(raw.slice(raw.indexOf('{'),raw.lastIndexOf('}')+1)) as {titles?:unknown}).titles; }
-          catch { titles=[]; }
-          if (translationsComplete(lines,titles))
-            return json({titles:(titles as string[]).map(item=>item.trim().slice(0,500))});
-          rejected=titles;
+          let candidate: unknown = [];
+          try {
+            const rawText = result.text.trim();
+            const firstBrace = rawText.indexOf('{');
+            const lastBrace = rawText.lastIndexOf('}');
+            const parsed = JSON.parse(rawText.slice(firstBrace, lastBrace + 1)) as { titles?: unknown };
+            candidate = parsed.titles;
+          } catch {
+            candidate = [];
+          }
+          if (validTranslationBatch(lines, candidate)) {
+            return json({ titles: candidate.map(title => title.trim().slice(0, 500)) });
+          }
+          incomplete = Array.isArray(candidate) ? candidate : [];
         }
-        return error('Translation omitted details. Please retry.',502);
+        return error('Translation omitted important work details. Please retry.', 502);
       } catch {
         return error('Detailed translation is temporarily unavailable.', 502);
       }
