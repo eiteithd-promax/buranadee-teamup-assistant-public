@@ -104,3 +104,32 @@ Steps:
 2. Generate PDF and inspect the first page. Compare title, date/ISO week row, calendar legend, timeline starting at approximately 14% of the page height, 08:00-20:00 time ruler, event blocks, and footer near 94% of the page height.
 3. Switch to Eco and regenerate. Then disable sidebar and verify events remain printed.
 Expected: Official-style header, W40 and right-hand date display; calendar legend occupies the left region; timeline aligns with event blocks; Full Color displays diagonal multi-calendar stripes while Eco has white blocks and colored outlines; hiding the legend never filters events.
+
+## Test 12 - Multi-day and all-day event export integrity [regression]
+Viewport: desktop
+Covers: Teamup API normalization, all-day events, midnight-exclusive end, Thai timezone, exported day count
+Setup: A Teamup calendar with events spanning 14-16 Oct 2026, a normal event on 15 Oct, and an all-day event on 16 Oct.
+Steps:
+1. Export 14-16 Oct with Skip empty days checked and unchecked.
+2. Verify the three-day event appears on each occupied date, with the single-day event retained.
+3. Verify All-day event titles are present in the detail pages.
+4. Inspect PDF and confirm no missing pages, and that the count equals the source day segments.
+Expected: No event is silently discarded, and exports spanning month boundaries retain the occupied dates.
+
+## Test 13 - Merge overlapping PDF batches without overwriting [regression]
+Viewport: desktop
+Covers: PDF Queue, overlapping dates, duplicate suppression, source event IDs
+Steps:
+1. Produce PDF batches for 14-15 Oct and 15-16 Oct with different event IDs on 15 Oct.
+2. Select both and merge.
+3. Review 15 Oct and verify events from both batches are present.
+4. Repeat with the same event ID in both batches.
+Expected: Both distinct events retained; identical events de-duplicated; no blank or overwritten date.
+
+## Test 14 - Block incomplete API response [regression]
+Viewport: desktop
+Covers: Teamup missing events-array response and export fails closed.
+Steps:
+1. Mock Teamup monthly API to return HTTP 200 without an events array.
+2. Attempt a multi-month PDF export.
+Expected: Export fails with visible warning, never emits a partially complete PDF or success message.
